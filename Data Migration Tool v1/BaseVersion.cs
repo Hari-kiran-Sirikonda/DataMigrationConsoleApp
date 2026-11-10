@@ -90,8 +90,7 @@ class BaseVersion
             throw new InvalidDataException("The CSV file is empty.");
         }
 
-        string[] headers = ParseCsvLine(lines[0]);
-        string[] expectedHeaders =
+        string[] expectedConnectionHeaders =
         {
             "SourceServerType",
             "SourceHost",
@@ -104,43 +103,21 @@ class BaseVersion
             "DestinationDatabase",
             "DestinationUsername",
         };
-
-        string expectedHeaderText = string.Join(',', expectedHeaders);
-
-        if (headers.Length != expectedHeaders.Length)
-        {
-            throw new InvalidDataException($"The first row must contain: {expectedHeaderText}.");
-        }
-
-        for (int i = 0; i < expectedHeaders.Length; i++)
-        {
-            if (!headers[i].Equals(expectedHeaders[i], StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidDataException($"The first row must contain: {expectedHeaderText}.");
-            }
-        }
+        string[] connectionHeaders = ParseCsvLine(lines[0]);
+        validateHeaders(expectedConnectionHeaders, connectionHeaders);
 
         //Reading the Table names and validating the data
         string tableNamesPath = Path.Combine(AppContext.BaseDirectory, "Tables.csv");
 
-        if (!File.Exists(tableNamesPath))
-        {
-            throw new FileNotFoundException("The table mapping CSV file was not found.", tableNamesPath);
-        }
+        string[] tablePairs = File.ReadAllLines(tableNamesPath);
 
-        string[] tables = File.ReadAllLines(tableNamesPath);
-
-        if (tables.Length == 0)
-        {
-            throw new InvalidDataException("The CSV file is empty.");
-        }
-
-        string[] tableHeaders = ParseCsvLine(tables[0]);
+        string[] tableHeaders = ParseCsvLine(tablePairs[0]);
         string[] expectedTableHeaders =
         {
             "SourceTables",
             "DestinationTables",
         };
+        validateHeaders(expectedTableHeaders, tableHeaders);
 
         string expectedTableHeaderText = string.Join(',', expectedTableHeaders);
 
@@ -159,16 +136,16 @@ class BaseVersion
 
         var mappings = new List<TableMapping>();
 
-        for (int lineNumber = 1; lineNumber < tables.Length; lineNumber++)
+        for (int lineNumber = 1; lineNumber < tablePairs.Length; lineNumber++)
         {
-            if (string.IsNullOrWhiteSpace(tables[lineNumber]))
+            if (string.IsNullOrWhiteSpace(tablePairs[lineNumber]))
             {
                 continue;
             }
 
-            string[] tablesPair = ParseCsvLine(tables[lineNumber]);
+            string[] pair = ParseCsvLine(tablePairs[lineNumber]);
 
-            if (tablesPair.Length != expectedTableHeaders.Length || Array.Exists(tablesPair, string.IsNullOrWhiteSpace))
+            if (pair.Length != expectedTableHeaders.Length || Array.Exists(pair, string.IsNullOrWhiteSpace))
             {
                 throw new InvalidDataException($"Line {lineNumber + 1} must contain fourteen values: SourceDatabase, SourceTables, DestinationDatabase, DestinationTables.");
             }
@@ -188,14 +165,14 @@ class BaseVersion
                 connections[3],
                 connections[4],
                 sourceServerPassword,
-                tablesPair[0],
+                pair[0],
                 ParseServerType(connections[5], lineNumber + 1),
                 connections[6],
                 ParsePort(connections[7], lineNumber + 1),
                 connections[8],
                 connections[9],
                 destinationServerPassword,
-                tablesPair[1]));
+                pair[1]));
         }
 
         if (mappings.Count == 0)
@@ -206,9 +183,22 @@ class BaseVersion
         return mappings;
     }
 
-    private static void checkHeaders(string[] expected, string[] headers)
+    private static void validateHeaders(string[] expected, string[] headers)
     {
+        string expectedHeaderText = string.Join(',', expected);
 
+        if (headers.Length != expected.Length)
+        {
+            throw new InvalidDataException($"The first row must contain: {expectedHeaderText}.");
+        }
+
+        for (int i = 0; i < expected.Length; i++)
+        {
+            if (!headers[i].Equals(expected[i], StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException($"The first row must contain: {expectedHeaderText}.");
+            }
+        }
     }
 
     private static string[] ParseCsvLine(string line)
