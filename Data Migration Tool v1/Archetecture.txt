@@ -1,0 +1,116 @@
+========================================================================================
+                          BASEVERSION: TABLE MIGRATION FLOWCHART
+========================================================================================
+
+                                  +-------------------+
+                                  |    Start: Main    |
+                                  +---------+---------+
+                                            |
+                                            v
+                                  +-------------------+
+                                  |   LoadSettings()  |<----+ Reads: app.settings.json for all the server related data
+                                  +---------+---------+				
+                                            |
+                                            | [Both conn strings present?]
+                                           / \
+                                   (No)   /   \   (Yes)
+                         +---------------+     +-----------------------+
+                         | Throw         |     | LoadTableMappings()   |<-- Reads: TableMappings.csv
+                         | InvalidOper-  |     +-----------+-----------+
+                         | ationException|                 |
+                         +---------------+                 | [Valid CSV format & data?]
+                                                          / \
+                                                  (No)   /   \   (Yes)
+                                        +---------------+     +------------------------+
+                                        | Throw         |     | Loop through each      |
+                                        | InvalidData-  |     | TableMapping entry     |<------+
+                                        | Exception     |     +-----------+------------+       |
+                                        +---------------+                 |                    |
+                                                                          v                    |
+                                                              +------------------------+       |
+                                                              |   MigrateTablePair()   |       |
+                                                              +-----------+------------+       |
+                                                                          |                    |
+                                                                          v                    |
+                                                              +------------------------+       |
+                                                              | Build Connection       |       |
+                                                              | Strings for Source/Dest|       |
+                                                              +-----------+------------+       |
+                                                                          |                    |
+                                                                          v                    |
+                                                              +------------------------+       |
+                                                              | Open SqlConnections    |       |
+                                                              +-----------+------------+       |
+                                                                          |                    |
+                                                                          v                    |
+                                                              +------------------------+       |
+                                                              | GetTableColumnNames()  |       |
+                                                              | (Source & Destination) |       |
+                                                              +-----------+------------+       |
+                                                                          |                    |
+                                                                          | [Columns found in  |
+                                                                          |  both tables?]     |
+                                                                         / \                   |
+                                                                 (No)   /   \   (Yes)          |
+                                                   +-------------------+     +-----------------+
+                                                   | Throw Invalid-    |     |
+                                                   | OperationException|     v
+                                                   +-------------------+ +------------------------+
+                                                                         | FindMissingColumns()   |
+                                                                         | (Logs missing schema)  |
+                                                                         +-----------+------------+
+                                                                                     |
+                                                                                     v
+                                                                         +------------------------+
+                                                                         | ExecuteReader():       |
+                                                                         | SELECT * FROM [Source] |
+                                                                         +-----------+------------+
+                                                                                     |
+                                                                                     v
+                                                                         +------------------------+
+                                                                         | Initialize SqlBulkCopy |
+                                                                         | (Batch: 5000, T/O: 600)|
+                                                                         +-----------+------------+
+                                                                                     |
+                                                                                     v
+                                                                         +------------------------+
+                                                                         | Map matching columns:  |
+                                                                         | reader -> destColumns  |
+                                                                         +-----------+------------+
+                                                                                     |
+                                                                                     | [Matching mappings > 0?]
+                                                                                    / \
+                                                             (Mappings == 0)       /   \  (Mappings > 0)
+                                                    +-----------------------------+     +------+
+                                                    | Log "Operation skipped"     |            |
+                                                    +--------------+--------------+            v
+                                                                   |             +------------------------+
+                                                                   |             | bulkCopy.WriteToServer |
+                                                                   |             +-------------+----------+
+                                                                   |                           |
+                                                                   +-------------+-------------+
+                                                                                 |
+                                                                                 | [More mappings in CSV?]
+                                                                                / \
+                                                                        (Yes)  /   \  (No)
+                                                                              +     +-------------------+
+                                                                              |     |     End: Main     |
+                                                                              |     +-------------------+
+                                                                              |
+                                                                              +---> [Loops back to next mapping]
+
+========================================================================================
+                               GLOBAL EXCEPTION HANDLING
+========================================================================================
+
+  +---------------------------+--------------------------------------------------------+
+  | Exception Type            | Handling Behavior                                      |
+  +---------------------------+--------------------------------------------------------+
+  | FileNotFoundException     | Handled in Main (JSON config or CSV missing)           |
+  | JsonException             | Handled in Main (Malformed JSON file)                  |
+  | InvalidDataException      | Handled in Main (Corrupt / invalid CSV layout)         |
+  | SqlException              | Caught locally per-table in MigrateTablePair,          |
+  |                           | and globally in Main for connection open failures      |
+  | TimeoutException          | Caught locally in MigrateTablePair                     |
+  | InvalidOperationException | Caught locally in MigrateTablePair & globally in Main  |
+  +---------------------------+--------------------------------------------------------+

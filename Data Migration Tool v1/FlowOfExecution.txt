@@ -1,0 +1,136 @@
+========================================================================================================
+                          DATA MIGRATION TOOL - EXECUTION FLOWCHART
+========================================================================================================
+
+ [START: Main()]
+       |
+       v
+ [Configure log4net]
+   * Reads AppContext.BaseDirectory/log4net.config via XmlConfigurator
+       |
+       v
+ [Try Block Entered]
+       |
+       v
+ [Call LoadTableMappings()]
+   |
+   +---> Check if "TableMappings.csv" exists in AppContext.BaseDirectory
+   |       |-- [NO]  --> Throw FileNotFoundException
+   |       \-- [YES] --> Continue
+   |
+   +---> Read all lines from file
+   |       |-- [EMPTY] --> Throw InvalidDataException
+   |       \-- [NOT EMPTY]
+   |
+   +---> Parse Row 0: ParseCsvLine(lines[0])
+   |       |-- Check quote pairings (Throws InvalidDataException if unmatched quote)
+   |       \-- Split by comma outside quotes
+   |
+   +---> Validate CSV Header
+   |       |-- Must match 14 expected fields (Case-insensitive)
+   |       |   (SourceServerType..SourceTable, DestinationServerType..DestinationTable)
+   |       \-- [MISMATCH] --> Throw InvalidDataException
+   |
+   +---> Loop over rows (lines 1 to N):
+   |       |-- Skip empty or whitespace lines
+   |       |-- Parse row values via ParseCsvLine()
+   |       |-- Validate column count == 14 and no empty/whitespace values
+   |       |-- Validate & parse fields:
+   |       |     * ParseServerType(): SqlServer / Sql / PostgreSql / PostgreSQL / Postgres
+   |       |     * ParsePort(): Integer range 1 to 65535
+   |       \-- Instantiate TableMapping and add to List<TableMapping>
+   |
+   +---> If mappings list is empty -> Throw InvalidDataException
+   \---> Return List<TableMapping>
+       |
+       v
+ [Log.Info: "Found X table mapping(s)."]
+       |
+       v
+ [Foreach mapping in mappings] <-----------------------------------------------------------------+
+       |                                                                                         |
+       v                                                                                         |
+ [Call MigrateTablePair(mapping)]                                                                |
+   |                                                                                             |
+   +---> Log.Info: "Starting migration: Source -> Destination"                                   |
+   |                                                                                             |
+   +---> Create & Open Source Connection: CreateConnection(...)                                  |
+   |       |-- [SqlServer]  --> Build SqlConnectionStringBuilder -> Return new SqlConnection     |
+   |       \-- [PostgreSql] --> Build NpgsqlConnectionStringBuilder -> Return new NpgsqlConnection
+   |                                                                                             |
+   +---> Create & Open Destination Connection: CreateConnection(...)                             |
+   |                                                                                             |
+   +---> Open both connections: sourceConnection.Open(), destinationConnection.Open()            |
+   |                                                                                             |
+   +---> [COMMON PRE-VALIDATION & LOGGING IN SUB-ROUTINES]                                       |
+   |       |                                                                                     |
+   |       +-> GetTableColumnNames(conn, table, serverType) [Source & Destination]               |
+   |       |     * Parse schema and table name (defaults: "dbo" for SQL, "public" for PG)        |
+   |       |     * Query INFORMATION_SCHEMA.COLUMNS parameterized by @Schema, @Table             |
+   |       |     * Return HashSet<string> (OrdinalIgnoreCase)                                    |
+   |       |                                                                                     |
+   |       +-> ValidateColumns()                                                                 |
+   |       |     * Check if sourceColumns == 0 or destinationColumns == 0                        |
+   |       |     * If empty -> Throw InvalidOperationException                                   |
+   |       |                                                                                     |
+   |       \-> LogColumnComparison()                                                             |
+   |             * FindMissingColumns(): Identifies columns present in A not in B, and B not A   |
+   |             * Log counts and warnings for missing columns                                   |
+   |                                                                                             |
+   +---> Route Migration by Server Types:                                                        |
+           |                                                                                     |
+           +-----------------------+-----------------------------+                               |
+           |                       |                             |                               |
+           v                       v                             v                               |
+    [SQL Server to           [PostgreSQL to              [Cross-Provider]                        |
+      SQL Server]             PostgreSQL]             (Any Mismatched Pair)                      |
+           |                       |                             |                               |
+           |                       |                             |                               |
+    [MigrateSqlServerPair]  [MigratePostgreSqlPair]       [MigrateCrossProviderPair]             |
+           |                       |                             |                               |
+     Run SELECT *            Run SELECT *                  Run SELECT *                          |
+     via SqlDataReader       via NpgsqlDataReader          via DbDataReader                      |
+           |                       |                             |                               |
+     Filter matching         Filter matching               Filter matching                       |
+     columns destination     columns destination           columns destination                   |
+     contains                contains                      contains                              |
+           |                       |                             |                               |
+     [Match count == 0?]     [Match count == 0?]           [Match count == 0?]                   |
+       |-- YES: Warn & exit    |-- YES: Warn & exit          |-- YES: Warn & exit                |
+       \-- NO: Continue        \-- NO: Continue              \-- NO: Continue                    |
+           |                       |                             |                               |
+     Setup SqlBulkCopy:      Init Binary Import:           Prepare Parameterized INSERT:         |
+     - BatchSize = 5000      destinationConnection         "INSERT INTO Dest (c1, c2..)          |
+     - Timeout = 600s        .BeginBinaryImport(           VALUES (@p0, @p1..)"                  |
+     - Add ColumnMappings    "COPY ... FROM STDIN BINARY")       |                               |
+           |                       |                       Execute in reader.Read() loop:        |
+     bulkCopy.WriteToServer  Loop reader.Read():           - Bind parameters per column          |
+     (stream reader direct)  - importer.StartRow()         - ExecuteNonQuery() per row           |
+           |                 - Write(val) / WriteNull()    - Increment rowsCopied                |
+           |                       |                             |                               |
+           |                 importer.Complete()                 |                               |
+           |                       |                             |                               |
+           \-----------------------+-----------------------------/                               |
+                                   |                                                             |
+                                   v                                                             |
+                     [Log.Info: Data copied successfully]                                        |
+                                   |                                                             |
+                                   v                                                             |
+                  [Close & Dispose DB Connections]                                               |
+                                   |                                                             |
+      (Catches DbException, TimeoutException, etc. per mapping)                                  |
+                                   |                                                             |
+                                   \-------------------------------------------------------------+
+                                   |
+                         (All mappings complete)
+                                   |
+                                   v
+             [Try Block Completes / Catch Top-Level Errors]
+               * Catch FileNotFoundException
+               * Catch InvalidDataException
+               * Catch InvalidOperationException
+               * Catch Exception
+                                   |
+                                   v
+                              [END: Main()]
+========================================================================================================
