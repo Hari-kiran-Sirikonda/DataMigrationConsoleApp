@@ -206,6 +206,11 @@ class BaseVersion
         return mappings;
     }
 
+    private static void checkHeaders(string[] expected, string[] headers)
+    {
+
+    }
+
     private static string[] ParseCsvLine(string line)
     {
         var values = new List<string>();
