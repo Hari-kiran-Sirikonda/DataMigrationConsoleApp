@@ -175,11 +175,11 @@ class BaseVersion
 
             //Read the the source Password from the console.
             Console.WriteLine($"Enter the Password for {connections[1]} : ");
-            String sourcePassword = Console.ReadLine();
+            String sourceServerPassword = Console.ReadLine();
 
             //Read the the destination Password from the console.
             Console.WriteLine($"Enter the Password for {connections[6]} : ");
-            String destinationPassword = Console.ReadLine();
+            String destinationServerPassword = Console.ReadLine();
 
             mappings.Add(new TableMapping(
                 ParseServerType(connections[0], lineNumber + 1),
@@ -187,14 +187,14 @@ class BaseVersion
                 ParsePort(connections[2], lineNumber + 1),
                 connections[3],
                 connections[4],
-                sourcePassword,
+                sourceServerPassword,
                 tablesPair[0],
                 ParseServerType(connections[5], lineNumber + 1),
                 connections[6],
                 ParsePort(connections[7], lineNumber + 1),
                 connections[8],
                 connections[9],
-                destinationPassword,
+                destinationServerPassword,
                 tablesPair[1]));
         }
 
