@@ -158,7 +158,32 @@ class BaseVersion
             Console.WriteLine($"Enter the Password for {connections[6]} : ");
             String destinationServerPassword = Console.ReadLine();
 
-            mappings.Add(new TableMapping(
+            //Read wether the source and destination table names are same
+            Console.WriteLine($"Are the source and destination table names are same (y/n)");
+            String inputSameTableNames = Console.ReadLine();
+            String sameTableNames = inputSameTableNames.ToLower();
+
+            if(sameTableNames == "y")
+            {
+                mappings.Add(new TableMapping(
+                ParseServerType(connections[0], lineNumber + 1),
+                connections[1],
+                ParsePort(connections[2], lineNumber + 1),
+                connections[3],
+                connections[4],
+                sourceServerPassword,
+                pair[0],
+                ParseServerType(connections[5], lineNumber + 1),
+                connections[6],
+                ParsePort(connections[7], lineNumber + 1),
+                connections[8],
+                connections[9],
+                destinationServerPassword,
+                pair[0]));
+            }
+            else if (sameTableNames == "n")
+            {
+                mappings.Add(new TableMapping(
                 ParseServerType(connections[0], lineNumber + 1),
                 connections[1],
                 ParsePort(connections[2], lineNumber + 1),
@@ -173,6 +198,11 @@ class BaseVersion
                 connections[9],
                 destinationServerPassword,
                 pair[1]));
+            }
+            else
+            {
+                throw new InvalidDataException("The Option should be either 'y' or 'n'");
+            }
         }
 
         if (mappings.Count == 0)
@@ -428,7 +458,7 @@ class BaseVersion
                 rowsCopied++;
             }
 
-            Log.Info($"Data copied successfully: {mapping.SourceTable} -> {mapping.DestinationTable}. Rows copied: {rowsCopied}");
+            Log.Info($"Data Migrated successfully: {mapping.SourceTable} -> {mapping.DestinationTable}. Rows copied: {rowsCopied}");
         }
         finally
         {
@@ -497,7 +527,7 @@ class BaseVersion
         }
 
         bulkCopy.WriteToServer(reader);
-        Log.Info($"Data copied successfully: {mapping.SourceTable} -> {mapping.DestinationTable}");
+        Log.Info($"Data Migrated successfully: {mapping.SourceTable} -> {mapping.DestinationTable}");
     }
 
     private static void MigratePostgreSqlPair(NpgsqlConnection sourceConnection, NpgsqlConnection destinationConnection, TableMapping mapping)
@@ -558,7 +588,7 @@ class BaseVersion
         }
 
         importer.Complete();
-        Log.Info($"Data copied successfully: {mapping.SourceTable} -> {mapping.DestinationTable}");
+        Log.Info($"Data Migrated successfully: {mapping.SourceTable} -> {mapping.DestinationTable}");
     }
 
     private static HashSet<string> GetTableColumnNames(DbConnection connection, string tableName, ServerType serverType)
