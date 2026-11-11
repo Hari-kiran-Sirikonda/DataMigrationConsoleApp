@@ -387,9 +387,6 @@ class BaseVersion
         string columnList = string.Join(", ", matchingColumns.Select(column => QuoteIdentifier(column.Name, mapping.DestinationServerType)));
         string parameterList = string.Join(", ", matchingColumns.Select((_, index) => $"@p{index}"));
 
-        //I just want to add a functionality for migrating the data from postgres to sql with identity insert operation possible.
-
-
         //This is the command used to insert the rows from source to destination.
         using DbCommand insertCommand = destinationConnection.CreateCommand();
         insertCommand.CommandText = $"INSERT INTO {QuoteTable(destinationTable, mapping.DestinationServerType)} ({columnList}) VALUES ({parameterList})";
@@ -401,20 +398,64 @@ class BaseVersion
             insertCommand.Parameters.Add(parameter);
         }
 
-        long rowsCopied = 0;
-        while (reader.Read())
+        bool identityInsertEnabled = false;
+
+        try
         {
-            for (int i = 0; i < matchingColumns.Count; i++)
+            if (mapping.DestinationServerType == ServerType.SqlServer &&
+                matchingColumns.Any(column => IsSqlServerIdentityColumn(
+                    (SqlConnection)destinationConnection,
+                    destinationTable,
+                    column.Name)))
             {
-                object value = reader.GetValue(matchingColumns[i].SourceOrdinal);
-                insertCommand.Parameters[i].Value = value is DBNull ? DBNull.Value : value;
+                using SqlCommand identityInsertCommand = new(
+                    $"SET IDENTITY_INSERT {QuoteTable(destinationTable, ServerType.SqlServer)} ON",
+                    (SqlConnection)destinationConnection);
+                identityInsertCommand.ExecuteNonQuery();
+                identityInsertEnabled = true;
             }
 
-            insertCommand.ExecuteNonQuery();
-            rowsCopied++;
-        }
+            long rowsCopied = 0;
+            while (reader.Read())
+            {
+                for (int i = 0; i < matchingColumns.Count; i++)
+                {
+                    object value = reader.GetValue(matchingColumns[i].SourceOrdinal);
+                    insertCommand.Parameters[i].Value = value is DBNull ? DBNull.Value : value;
+                }
 
-        Log.Info($"Data copied successfully: {mapping.SourceTable} -> {mapping.DestinationTable}. Rows copied: {rowsCopied}");
+                insertCommand.ExecuteNonQuery();
+                rowsCopied++;
+            }
+
+            Log.Info($"Data copied successfully: {mapping.SourceTable} -> {mapping.DestinationTable}. Rows copied: {rowsCopied}");
+        }
+        finally
+        {
+            if (identityInsertEnabled)
+            {
+                using SqlCommand identityInsertCommand = new(
+                    $"SET IDENTITY_INSERT {QuoteTable(destinationTable, ServerType.SqlServer)} OFF",
+                    (SqlConnection)destinationConnection);
+                identityInsertCommand.ExecuteNonQuery();
+            }
+        }
+    }
+
+    private static bool IsSqlServerIdentityColumn(SqlConnection connection, TableReference table, string columnName)
+    {
+        using SqlCommand command = new(
+            "SELECT COUNT(*) FROM sys.identity_columns AS ic " +
+            "INNER JOIN sys.tables AS t ON t.object_id = ic.object_id " +
+            "INNER JOIN sys.schemas AS s ON s.schema_id = t.schema_id " +
+            "INNER JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id " +
+            "WHERE s.name = @schema AND t.name = @table AND c.name = @column",
+            connection);
+        command.Parameters.AddWithValue("@schema", table.Schema);
+        command.Parameters.AddWithValue("@table", table.Table);
+        command.Parameters.AddWithValue("@column", columnName);
+
+        return Convert.ToInt32(command.ExecuteScalar()) > 0;
     }
 
     private static void MigrateSqlServerPair(SqlConnection sourceConnection, SqlConnection destinationConnection, TableMapping mapping)
