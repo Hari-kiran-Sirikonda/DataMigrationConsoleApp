@@ -1,2 +1,2 @@
 SourceServerType,SourceHost,SourcePort,SourceDatabase,SourceUsername,DestinationServerType,DestinationHost,DestinationPort,DestinationDatabase,DestinationUsername
-SqlServer,10.171.48.234,1433,ExperienceAnalyzer_Luma,up_user,SqlServer,10.171.48.234,1433,ExperienceAnalyzer_Sample,up_user
+PostgreSql,10.171.48.239,5432,experience_analyzer,svc_experience_analyzer,SqlServer,10.171.48.234,1433,ExperienceAnalyzer_Sample,up_user

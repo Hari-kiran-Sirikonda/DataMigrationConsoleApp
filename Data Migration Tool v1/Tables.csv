@@ -1,2 +1,2 @@
 SourceTables,DestinationTables
-ia.CallVolume,ia.callvolume_test
+dest_scema.demo2,dbo.demo1

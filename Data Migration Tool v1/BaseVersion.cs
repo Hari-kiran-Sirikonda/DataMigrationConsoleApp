@@ -387,6 +387,10 @@ class BaseVersion
         string columnList = string.Join(", ", matchingColumns.Select(column => QuoteIdentifier(column.Name, mapping.DestinationServerType)));
         string parameterList = string.Join(", ", matchingColumns.Select((_, index) => $"@p{index}"));
 
+        //I just want to add a functionality for migrating the data from postgres to sql with identity insert operation possible.
+
+
+        //This is the command used to insert the rows from source to destination.
         using DbCommand insertCommand = destinationConnection.CreateCommand();
         insertCommand.CommandText = $"INSERT INTO {QuoteTable(destinationTable, mapping.DestinationServerType)} ({columnList}) VALUES ({parameterList})";
 
