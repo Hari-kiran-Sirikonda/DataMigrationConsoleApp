@@ -32,7 +32,8 @@ class BaseVersion
         string DestinationDatabase,
         string DestinationUsername,
         string DestinationPassword,
-        string DestinationTable);
+        string DestinationTable,
+        string WhereConditionString);
 
     private sealed record TableReference(string Schema, string Table);
 
@@ -127,6 +128,7 @@ class BaseVersion
         {
             "SourceTables",
             "DestinationTables",
+            "WhereConditionString",
         };
         validateHeaders(expectedTableHeaders, tableHeaders);
 
@@ -190,7 +192,8 @@ class BaseVersion
                 connections[8],
                 connections[9],
                 destinationServerPassword,
-                pair[0]));
+                pair[0],
+                pair[2]));
             }
             else if (sameTableNames == "n")
             {
@@ -208,7 +211,8 @@ class BaseVersion
                 connections[8],
                 connections[9],
                 destinationServerPassword,
-                pair[1]));
+                pair[1],
+                pair[2]));
             }
             else
             {
@@ -493,17 +497,37 @@ class BaseVersion
             sourceConnection.Open();
             destinationConnection.Open();
 
-            if (mapping.SourceServerType == ServerType.SqlServer && mapping.DestinationServerType == ServerType.SqlServer)
+            if (mapping.SourceServerType == ServerType.SqlServer && mapping.DestinationServerType == ServerType.SqlServer && !(string.IsNullOrWhiteSpace(mapping.WhereConditionString)))
             {
-                MigrateSqlServerPair((SqlConnection)sourceConnection, (SqlConnection)destinationConnection, mapping);
+                if (!(string.IsNullOrWhiteSpace(mapping.WhereConditionString)))
+                {
+                    MigrateSqlServerPair((SqlConnection)sourceConnection, (SqlConnection)destinationConnection, mapping);
+                }
+                else
+                {
+                    Log.Warn($"[SKIPPED] Table Migration from '{mapping.SourceDatabase}.{mapping.SourceTable}' --> '{mapping.DestinationDatabase}.{mapping.DestinationTable}'.");
+                }
             }
             else if (mapping.SourceServerType == ServerType.PostgreSql && mapping.DestinationServerType == ServerType.PostgreSql)
             {
-                MigratePostgreSqlPair((NpgsqlConnection)sourceConnection, (NpgsqlConnection)destinationConnection, mapping);
+                if (!(string.IsNullOrWhiteSpace(mapping.WhereConditionString)))
+                {
+                    MigratePostgreSqlPair((NpgsqlConnection)sourceConnection, (NpgsqlConnection)destinationConnection, mapping);
+                }
+                else
+                {
+                    Log.Warn($"[SKIPPED] Table Migration from '{mapping.SourceDatabase}.{mapping.SourceTable}' --> '{mapping.DestinationDatabase}.{mapping.DestinationTable}'.");
+                }
             }
             else
             {
-                MigrateCrossProviderPair(sourceConnection, destinationConnection, mapping);
+                if (!(string.IsNullOrWhiteSpace(mapping.WhereConditionString))){
+                    MigrateCrossProviderPair(sourceConnection, destinationConnection, mapping);
+                }
+                else
+                {
+                    Log.Warn($"[SKIPPED] Table Migration from '{mapping.SourceDatabase}.{mapping.SourceTable}' --> '{mapping.DestinationDatabase}.{mapping.DestinationTable}'.");
+                }
             }
         }
         catch (DbException ex)
@@ -535,7 +559,7 @@ class BaseVersion
         TableReference destinationTable = ParseTableName(mapping.DestinationTable, mapping.DestinationServerType);
 
         using DbCommand sourceCommand = sourceConnection.CreateCommand();
-        sourceCommand.CommandText = $"SELECT * FROM {QuoteTable(sourceTable, mapping.SourceServerType)}";
+        sourceCommand.CommandText = $"SELECT * FROM {QuoteTable(sourceTable, mapping.SourceServerType)} where {mapping.WhereConditionString}";
         using DbDataReader reader = sourceCommand.ExecuteReader();
 
         var matchingColumns = new List<(int SourceOrdinal, string Name)>();
@@ -643,7 +667,7 @@ class BaseVersion
         LogColumnComparison(sourceColumns, destinationColumns, mapping);
 
         TableReference sourceTable = ParseTableName(mapping.SourceTable, ServerType.SqlServer);
-        using SqlCommand command = new($"SELECT * FROM {QuoteTable(sourceTable, ServerType.SqlServer)}", sourceConnection);
+        using SqlCommand command = new($"SELECT * FROM {QuoteTable(sourceTable, ServerType.SqlServer)} where {mapping.WhereConditionString}", sourceConnection);
         using SqlDataReader reader = command.ExecuteReader();
         using SqlBulkCopy bulkCopy = new(destinationConnection, SqlBulkCopyOptions.KeepIdentity, null)
         {
@@ -686,7 +710,7 @@ class BaseVersion
 
         TableReference sourceTable = ParseTableName(mapping.SourceTable, ServerType.PostgreSql);
         TableReference destinationTable = ParseTableName(mapping.DestinationTable, ServerType.PostgreSql);
-        using NpgsqlCommand command = new($"SELECT * FROM {QuoteTable(sourceTable, ServerType.PostgreSql)}", sourceConnection);
+        using NpgsqlCommand command = new($"SELECT * FROM {QuoteTable(sourceTable, ServerType.PostgreSql)} where {mapping.WhereConditionString}", sourceConnection);
         using NpgsqlDataReader reader = command.ExecuteReader();
 
         var matchingColumns = new List<(int SourceOrdinal, string Name)>();
