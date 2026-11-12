@@ -36,6 +36,16 @@ class BaseVersion
 
     private sealed record TableReference(string Schema, string Table);
 
+    private sealed record DestinationConnectionKey(
+        ServerType ServerType,
+        string Host,
+        int Port,
+        string Database,
+        string Username,
+        string Password);
+
+    private sealed record ForeignKeyDependency(TableReference Parent, TableReference Child);
+
     public record MissingColumnInfo(string MissingFrom, string ColumnName);
 
     static void Main()
@@ -45,7 +55,8 @@ class BaseVersion
 
         try
         {
-            List<TableMapping> mappings = LoadTableMappings();
+                List<TableMapping> mappings = LoadTableMappings();
+                mappings = OrderMappingsByDestinationDependencies(mappings);
 
             Log.Info($"Found {mappings.Count} table mapping(s).");
 
@@ -151,15 +162,15 @@ class BaseVersion
             }
 
             //Read the the source Password from the console.
-            Console.WriteLine($"Enter the Password for {connections[1]} : ");
+            Console.Write($"Enter the Password for {connections[1]} : ");
             String sourceServerPassword = Console.ReadLine();
 
             //Read the the destination Password from the console.
-            Console.WriteLine($"Enter the Password for {connections[6]} : ");
+            Console.Write($"Enter the Password for {connections[6]} : ");
             String destinationServerPassword = Console.ReadLine();
 
             //Read wether the source and destination table names are same
-            Console.WriteLine($"Are the source and destination table names are same (y/n)");
+            Console.Write($"Are the source and destination table names are same (y/n) : ");
             String inputSameTableNames = Console.ReadLine();
             String sameTableNames = inputSameTableNames.ToLower();
 
@@ -211,6 +222,141 @@ class BaseVersion
         }
 
         return mappings;
+    }
+
+    private static List<TableMapping> OrderMappingsByDestinationDependencies(List<TableMapping> mappings)
+    {
+        var orderedMappings = new List<TableMapping>(mappings.Count);
+
+        foreach (IGrouping<DestinationConnectionKey, TableMapping> group in mappings.GroupBy(mapping => new DestinationConnectionKey(
+            mapping.DestinationServerType,
+            mapping.DestinationHost,
+            mapping.DestinationPort,
+            mapping.DestinationDatabase,
+            mapping.DestinationUsername,
+            mapping.DestinationPassword)))
+        {
+            using DbConnection connection = CreateConnection(
+                group.Key.ServerType,
+                group.Key.Host,
+                group.Key.Port,
+                group.Key.Database,
+                group.Key.Username,
+                group.Key.Password);
+            connection.Open();
+
+            List<TableMapping> groupMappings = group.ToList();
+            List<ForeignKeyDependency> dependencies = GetForeignKeyDependencies(connection, group.Key.ServerType);
+            orderedMappings.AddRange(TopologicallySortMappings(groupMappings, dependencies));
+        }
+
+        return orderedMappings;
+    }
+
+    private static List<ForeignKeyDependency> GetForeignKeyDependencies(DbConnection connection, ServerType serverType)
+    {
+        const string sqlServerQuery =
+            "SELECT parentSchema.name, parentTable.name, childSchema.name, childTable.name " +
+            "FROM sys.foreign_keys AS fk " +
+            "INNER JOIN sys.tables AS parentTable ON parentTable.object_id = fk.referenced_object_id " +
+            "INNER JOIN sys.schemas AS parentSchema ON parentSchema.schema_id = parentTable.schema_id " +
+            "INNER JOIN sys.tables AS childTable ON childTable.object_id = fk.parent_object_id " +
+            "INNER JOIN sys.schemas AS childSchema ON childSchema.schema_id = childTable.schema_id";
+
+        const string postgresQuery =
+            "SELECT parentNamespace.nspname, parentTable.relname, childNamespace.nspname, childTable.relname " +
+            "FROM pg_constraint AS constraintInfo " +
+            "INNER JOIN pg_class AS parentTable ON parentTable.oid = constraintInfo.confrelid " +
+            "INNER JOIN pg_namespace AS parentNamespace ON parentNamespace.oid = parentTable.relnamespace " +
+            "INNER JOIN pg_class AS childTable ON childTable.oid = constraintInfo.conrelid " +
+            "INNER JOIN pg_namespace AS childNamespace ON childNamespace.oid = childTable.relnamespace " +
+            "WHERE constraintInfo.contype = 'f'";
+
+        using DbCommand command = connection.CreateCommand();
+        command.CommandText = serverType == ServerType.SqlServer ? sqlServerQuery : postgresQuery;
+
+        using DbDataReader reader = command.ExecuteReader();
+        var dependencies = new List<ForeignKeyDependency>();
+
+        while (reader.Read())
+        {
+            dependencies.Add(new ForeignKeyDependency(
+                new TableReference(reader.GetString(0), reader.GetString(1)),
+                new TableReference(reader.GetString(2), reader.GetString(3))));
+        }
+
+        return dependencies;
+    }
+
+    private static List<TableMapping> TopologicallySortMappings(
+        List<TableMapping> mappings,
+        List<ForeignKeyDependency> dependencies)
+    {
+        var mappingByTable = new Dictionary<string, TableMapping>(StringComparer.OrdinalIgnoreCase);
+        foreach (TableMapping mapping in mappings)
+        {
+            string tableKey = GetTableKey(ParseTableName(mapping.DestinationTable, mapping.DestinationServerType));
+            if (!mappingByTable.TryAdd(tableKey, mapping))
+            {
+                throw new InvalidOperationException($"Destination table '{mapping.DestinationTable}' is mapped more than once.");
+            }
+        }
+
+        var childTablesByParent = mappingByTable.Keys.ToDictionary(key => key, _ => new List<string>(), StringComparer.OrdinalIgnoreCase);
+        var dependencyCounts = mappingByTable.Keys.ToDictionary(key => key, _ => 0, StringComparer.OrdinalIgnoreCase);
+
+        foreach (ForeignKeyDependency dependency in dependencies)
+        {
+            string parentKey = GetTableKey(dependency.Parent);
+            string childKey = GetTableKey(dependency.Child);
+
+            if (!mappingByTable.ContainsKey(parentKey) || !mappingByTable.ContainsKey(childKey))
+            {
+                continue;
+            }
+
+            if (parentKey.Equals(childKey, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Self-referencing foreign-key dependency detected on destination table '{dependency.Child.Schema}.{dependency.Child.Table}'. This table requires a two-phase migration or a deferrable constraint.");
+            }
+
+            if (!childTablesByParent[parentKey].Contains(childKey, StringComparer.OrdinalIgnoreCase))
+            {
+                childTablesByParent[parentKey].Add(childKey);
+                dependencyCounts[childKey]++;
+            }
+        }
+
+        var remainingKeys = new HashSet<string>(mappingByTable.Keys, StringComparer.OrdinalIgnoreCase);
+        var result = new List<TableMapping>(mappings.Count);
+
+        while (remainingKeys.Count > 0)
+        {
+            string nextKey = mappings
+                .Select(mapping => GetTableKey(ParseTableName(mapping.DestinationTable, mapping.DestinationServerType)))
+                .FirstOrDefault(key => remainingKeys.Contains(key) && dependencyCounts[key] == 0);
+
+            if (nextKey is null)
+            {
+                string cycle = string.Join(", ", remainingKeys.Select(key => mappingByTable[key].DestinationTable));
+                throw new InvalidOperationException($"Circular foreign-key dependency detected among destination tables: {cycle}. These tables require a two-phase migration or deferrable constraints.");
+            }
+
+            remainingKeys.Remove(nextKey);
+            result.Add(mappingByTable[nextKey]);
+
+            foreach (string childKey in childTablesByParent[nextKey])
+            {
+                dependencyCounts[childKey]--;
+            }
+        }
+
+        return result;
+    }
+
+    private static string GetTableKey(TableReference table)
+    {
+        return $"{table.Schema.ToLowerInvariant()}.{table.Table.ToLowerInvariant()}";
     }
 
     private static void validateHeaders(string[] expected, string[] headers)
@@ -469,6 +615,7 @@ class BaseVersion
                     (SqlConnection)destinationConnection);
                 identityInsertCommand.ExecuteNonQuery();
             }
+
         }
     }
 
@@ -498,7 +645,7 @@ class BaseVersion
         TableReference sourceTable = ParseTableName(mapping.SourceTable, ServerType.SqlServer);
         using SqlCommand command = new($"SELECT * FROM {QuoteTable(sourceTable, ServerType.SqlServer)}", sourceConnection);
         using SqlDataReader reader = command.ExecuteReader();
-        using SqlBulkCopy bulkCopy = new(destinationConnection, SqlBulkCopyOptions.Default, null)
+        using SqlBulkCopy bulkCopy = new(destinationConnection, SqlBulkCopyOptions.KeepIdentity, null)
         {
             DestinationTableName = QuoteTable(ParseTableName(mapping.DestinationTable, ServerType.SqlServer), ServerType.SqlServer),
             BatchSize = 5000,

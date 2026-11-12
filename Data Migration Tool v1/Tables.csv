@@ -1,2 +1,2 @@
 SourceTables,DestinationTables
-dest_scema.demo2,dbo.demo1
+dbo.demo1,dest_scema.demo2
