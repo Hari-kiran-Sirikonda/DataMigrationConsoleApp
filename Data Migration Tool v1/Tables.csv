@@ -1,2 +1,13 @@
 SourceTables,DestinationTables,WhereConditionString
-adm.BusinessUnit,adm.business_unit,1=1
+adm.Company,adm.company,1=1
+adm.EndPoint,adm.end_point,1=1
+adm.RoutingTarget,adm.routing_target,1=1
+adm.Skill,adm.skill,1=1
+adm.Steps,adm.steps,1=1
+adm.Team,adm.team,1=1
+adm.TeamUser,adm.team_user,1=1
+adm.User,adm.user,1=1
+adm.UserGroup,adm.user_group,1=1
+adm.UserQueue,adm.user_queue,1=1
+adm.UserSkill,adm.user_skill,1=1
+adm.WrapCode,adm.wrap_code,1=1

@@ -38,6 +38,8 @@ class BaseVersion
 
     private sealed record TableReference(string Schema, string Table);
 
+    private sealed record ColumnMapping(int SourceOrdinal, string SourceName, string DestinationName);
+
     private sealed record DestinationConnectionKey(
         ServerType ServerType,
         string Host,
@@ -150,6 +152,19 @@ class BaseVersion
 
         var mappings = new List<TableMapping>();
 
+        //Read the the source Password from the console.
+        Console.Write($"Enter the Password for {connections[1]} : ");
+        String sourceServerPassword = Console.ReadLine();
+
+        //Read the the destination Password from the console.
+        Console.Write($"Enter the Password for {connections[6]} : ");
+        String destinationServerPassword = Console.ReadLine();
+
+        //Read wether the source and destination table names are same
+        Console.Write($"Are the source and destination table names are same (y/n) : ");
+        String inputSameTableNames = Console.ReadLine();
+        String sameTableNames = inputSameTableNames.ToLower();
+
         for (int lineNumber = 1; lineNumber < tablePairs.Length; lineNumber++)
         {
             if (string.IsNullOrWhiteSpace(tablePairs[lineNumber]))
@@ -163,19 +178,6 @@ class BaseVersion
             {
                 throw new InvalidDataException($"Line {lineNumber + 1} must contain fourteen values: SourceDatabase, SourceTables, DestinationDatabase, DestinationTables.");
             }
-
-            //Read the the source Password from the console.
-            Console.Write($"Enter the Password for {connections[1]} : ");
-            String sourceServerPassword = Console.ReadLine();
-
-            //Read the the destination Password from the console.
-            Console.Write($"Enter the Password for {connections[6]} : ");
-            String destinationServerPassword = Console.ReadLine();
-
-            //Read wether the source and destination table names are same
-            Console.Write($"Are the source and destination table names are same (y/n) : ");
-            String inputSameTableNames = Console.ReadLine();
-            String sameTableNames = inputSameTableNames.ToLower();
 
             if(sameTableNames == "y")
             {
@@ -575,15 +577,23 @@ class BaseVersion
         sourceCommand.CommandText = $"SELECT * FROM {QuoteTable(sourceTable, mapping.SourceServerType)} where {mapping.WhereConditionString}";
         using DbDataReader reader = sourceCommand.ExecuteReader();
 
-        var matchingColumns = new List<(int SourceOrdinal, string Name)>();
+        Dictionary<string, string> destinationColumnsByNormalizedName = BuildNormalizedColumnMap(destinationColumns, mapping.DestinationTable);
+        var matchingColumns = new List<ColumnMapping>();
+        var sourceColumnsByNormalizedName = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < reader.FieldCount; i++)
         {
             string sourceColumnName = reader.GetName(i);
+            string normalizedSourceName = ToSnakeCase(sourceColumnName);
 
-            if (destinationColumns.Contains(sourceColumnName))
+            if (destinationColumnsByNormalizedName.TryGetValue(normalizedSourceName, out string destinationColumnName))
             {
-                matchingColumns.Add((i, sourceColumnName));
-                Log.Info($"[MATCH FOUND] Source column '{sourceColumnName}' exists in destination table '{mapping.DestinationTable}'.");
+                if (!sourceColumnsByNormalizedName.Add(normalizedSourceName))
+                {
+                    throw new InvalidOperationException($"Source table '{mapping.SourceTable}' contains multiple columns that normalize to '{normalizedSourceName}'.");
+                }
+
+                matchingColumns.Add(new ColumnMapping(i, sourceColumnName, destinationColumnName));
+                Log.Info($"[MATCH FOUND] Source column '{sourceColumnName}' maps to destination column '{destinationColumnName}' in table '{mapping.DestinationTable}'.");
             }
             else
             {
@@ -597,7 +607,7 @@ class BaseVersion
             return;
         }
 
-        string columnList = string.Join(", ", matchingColumns.Select(column => QuoteIdentifier(column.Name, mapping.DestinationServerType)));
+        string columnList = string.Join(", ", matchingColumns.Select(column => QuoteIdentifier(column.DestinationName, mapping.DestinationServerType)));
         string parameterList = string.Join(", ", matchingColumns.Select((_, index) => $"@p{index}"));
 
         //This is the command used to insert the rows from source to destination.
@@ -619,7 +629,7 @@ class BaseVersion
                 matchingColumns.Any(column => IsSqlServerIdentityColumn(
                     (SqlConnection)destinationConnection,
                     destinationTable,
-                    column.Name)))
+                    column.DestinationName)))
             {
                 using SqlCommand identityInsertCommand = new(
                     $"SET IDENTITY_INSERT {QuoteTable(destinationTable, ServerType.SqlServer)} ON",
@@ -803,6 +813,25 @@ class BaseVersion
         return columns;
     }
 
+    private static Dictionary<string, string> BuildNormalizedColumnMap(IEnumerable<string> columnNames, string tableName)
+    {
+        var normalizedColumns = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string columnName in columnNames)
+        {
+            string normalizedName = ToSnakeCase(columnName);
+
+            if (normalizedColumns.TryGetValue(normalizedName, out string existingColumnName))
+            {
+                throw new InvalidOperationException($"Destination table '{tableName}' contains columns '{existingColumnName}' and '{columnName}' that both normalize to '{normalizedName}'.");
+            }
+
+            normalizedColumns.Add(normalizedName, columnName);
+        }
+
+        return normalizedColumns;
+    }
+
     private static TableReference ParseTableName(string tableName, ServerType serverType)
     {
         string[] parts = tableName.Split('.', StringSplitOptions.TrimEntries);
@@ -846,7 +875,9 @@ class BaseVersion
         Log.Info($"Count of Source Columns: {sourceColumns.Count}");
         Log.Info($"Count of Destination Columns: {destinationColumns.Count}");
 
-        var missingColumns = FindMissingColumns(sourceColumns, destinationColumns, mapping.SourceTable, mapping.DestinationTable);
+        List<MissingColumnInfo> missingColumns = mapping.SourceServerType == mapping.DestinationServerType
+            ? FindMissingColumns(sourceColumns, destinationColumns, mapping.SourceTable, mapping.DestinationTable)
+            : FindMissingColumnsByNormalizedName(sourceColumns, destinationColumns, mapping.SourceTable, mapping.DestinationTable);
         if (missingColumns.Count == 0)
         {
             Log.Info("No columns are missing.");
@@ -858,6 +889,35 @@ class BaseVersion
         {
             Log.Warn($"Missing from {item.MissingFrom}: {item.ColumnName}");
         }
+    }
+
+    private static List<MissingColumnInfo> FindMissingColumnsByNormalizedName(
+        HashSet<string> sourceColumns,
+        HashSet<string> destinationColumns,
+        string sourceTableName,
+        string destinationTableName)
+    {
+        Dictionary<string, string> sourceColumnsByNormalizedName = BuildNormalizedColumnMap(sourceColumns, sourceTableName);
+        Dictionary<string, string> destinationColumnsByNormalizedName = BuildNormalizedColumnMap(destinationColumns, destinationTableName);
+        var missingColumns = new List<MissingColumnInfo>();
+
+        foreach (KeyValuePair<string, string> sourceColumn in sourceColumnsByNormalizedName)
+        {
+            if (!destinationColumnsByNormalizedName.ContainsKey(sourceColumn.Key))
+            {
+                missingColumns.Add(new MissingColumnInfo(destinationTableName, sourceColumn.Value));
+            }
+        }
+
+        foreach (KeyValuePair<string, string> destinationColumn in destinationColumnsByNormalizedName)
+        {
+            if (!sourceColumnsByNormalizedName.ContainsKey(destinationColumn.Key))
+            {
+                missingColumns.Add(new MissingColumnInfo(sourceTableName, destinationColumn.Value));
+            }
+        }
+
+        return missingColumns;
     }
 
     public static List<MissingColumnInfo> FindMissingColumns(HashSet<string> tableAColumns, HashSet<string> tableBColumns, string tableAName, string tableBName)
