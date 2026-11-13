@@ -1,0 +1,132 @@
+========================================================================================
+                          BASEVERSION: TABLE MIGRATION FLOWCHART
+========================================================================================
+
+                                  +-------------------+
+                                  |    Start: Main    |
+                                  +---------+---------+
+                                            |
+                                            v
+                                  +-------------------+
+                                  | XmlConfigurator.  |<----+ Reads: log4net.config
+                                  | Configure()       |
+                                  +---------+---------+
+                                            |
+                                            v
+                                  +-------------------+
+                                  | LoadTableMappings |<----+ Reads: TableMappings.csv
+                                  | ()                |       & Tables.csv
+                                  +---------+---------+
+                                            |
+                                            | [Files exist, headers valid,
+                                            |  & console inputs ('y'/'n') valid?]
+                                           / \
+                                   (No)   /   \   (Yes)
+                         +---------------+     +-----------------------+
+                         | Throw FileNot-|     | OrderMappingsByDesti- |<-- Queries: sys.foreign_keys
+                         | Found / Inval-|     | nationDependencies()  |    or pg_constraint
+                         | idDataExcep.  |     +-----------+-----------+
+                         +---------------+                 |
+                                                           | [Valid DAG (no self-ref
+                                                           |  or circular FK cycles)?]
+                                                          / \
+                                                  (No)   /   \   (Yes)
+                                        +---------------+     +------------------------+
+                                        | Throw Invalid-|     | Loop through each      |
+                                        | Operation-    |     | ordered TableMapping   |<------+
+                                        | Exception     |     +-----------+------------+       |
+                                        +---------------+                 |                    |
+                                                                          v                    |
+                                                              +------------------------+       |
+                                                              |   MigrateTablePair()   |       |
+                                                              +-----------+------------+       |
+                                                                          |                    |
+                                                                          v                    |
+                                                              +------------------------+       |
+                                                              | Create & Open Source / |       |
+                                                              | Dest DbConnections     |       |
+                                                              +-----------+------------+       |
+                                                                          |                    |
+                                                                          | [WhereConditionString|
+                                                                          |  populated?]       |
+                                                                         / \                   |
+                                                                 (No)   /   \   (Yes)          |
+                                                   +-------------------+     +-----------------+
+                                                   | Log "[SKIPPED]"   |     |
+                                                   | Warning           |     v
+                                                   +---------+---------+ +------------------------+
+                                                             |           | Route by Provider Pair:|
+                                                             |           | - SqlServer -> SqlServer |
+                                                             |           | - Postgres -> Postgres   |
+                                                             |           | - Cross-Provider         |
+                                                             |           +-----------+------------+
+                                                             |                       |
+                                                             |                       v
+                                                             |           +------------------------+
+                                                             |           | GetTableColumnNames()  |
+                                                             |           | & ValidateColumns()    |
+                                                             |           +-----------+------------+
+                                                             |                       |
+                                                             |                       | [Both tables have
+                                                             |                       |  > 0 columns?]
+                                                             |                      / \
+                                                             |              (No)   /   \   (Yes)
+                                                             |    +---------------+     +------+
+                                                             |    | Throw Invalid-|            |
+                                                             |    | OperationEx.  |            v
+                                                             |    +---------------+ +------------------------+
+                                                             |                      | FindMissingColumns()   |
+                                                             |                      | (Logs schema diffs)    |
+                                                             |                      +-----------+------------+
+                                                             |                                  |
+                                                             |                                  v
+                                                             |                      +------------------------+
+                                                             |                      | ExecuteReader():       |
+                                                             |                      | SELECT * FROM [Source] |
+                                                             |                      | WHERE [Condition]      |
+                                                             |                      +-----------+------------+
+                                                             |                                  |
+                                                             |                                  | [Matching columns > 0?]
+                                                             |                                 / \
+                                                             |                 (Count == 0)   /   \   (Count > 0)
+                                                             |    +--------------------------+     +------+
+                                                             |    | Log "No matching columns |            |
+                                                             |    | found. Operation skipped"|            v
+                                                             |    +------------+-------------+ +------------------------+
+                                                             |                 |               | Execute Transfer:      |
+                                                             |                 |               | - SqlBulkCopy          |
+                                                             |                 |               | - NpgsqlBinaryImporter |
+                                                             |                 |               | - Parameterized INSERT |
+                                                             |                 |               +------------+-----------+
+                                                             |                 |                            |
+                                                             +-----------------+----------------------------+
+                                                                               |
+                                                                               | [More mappings in List?]
+                                                                              / \
+                                                                      (Yes)  /   \  (No)
+                                                                            +     +-------------------+
+                                                                            |     |     End: Main     |
+                                                                            |     +-------------------+
+                                                                            |
+                                                                            +---> [Loops back to next mapping]
+
+========================================================================================
+                                GLOBAL EXCEPTION HANDLING
+========================================================================================
+
+  +---------------------------+--------------------------------------------------------+
+  | Exception Type            | Handling Behavior                                      |
+  +---------------------------+--------------------------------------------------------+
+  | FileNotFoundException     | Handled in Main (TableMappings.csv or Tables.csv       |
+  |                           | missing from AppContext.BaseDirectory)                 |
+  | InvalidDataException      | Handled in Main (Invalid CSV headers, row counts,      |
+  |                           | port/server type, or 'y'/'n' console prompt input)     |
+  | InvalidOperationException | Handled in Main (Duplicate destination table, self-    |
+  |                           | referencing FK, or circular FK cycle) AND caught       |
+  |                           | locally per-table in MigrateTablePair (0 columns)      |
+  | DbException               | Caught locally per-table in MigrateTablePair           |
+  |                           | (Covers both SqlException and NpgsqlException)         |
+  | TimeoutException          | Caught locally per-table in MigrateTablePair           |
+  | Exception (Catch-All)     | Caught locally per-table in MigrateTablePair AND       |
+  |                           | globally in Main to ensure graceful termination        |
+  +---------------------------+--------------------------------------------------------+

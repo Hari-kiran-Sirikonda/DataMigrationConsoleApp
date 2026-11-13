@@ -1,12 +1,13 @@
-﻿using Microsoft.Data.SqlClient;
-using Npgsql;
-using log4net;
+﻿using log4net;
 using log4net.Config;
+using Microsoft.Data.SqlClient;
+using Npgsql;
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 
 class BaseVersion
 {
@@ -228,6 +229,20 @@ class BaseVersion
         return mappings;
     }
 
+    public static string ToSnakeCase(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            return input;
+
+        // 1. Insert underscore between an acronym and the start of a new word (e.g., "HTTPRequest" -> "HTTP_Request")
+        string step1 = Regex.Replace(input, @"([A-Z]+)([A-Z][a-z])", "$1_$2");
+
+        // 2. Insert underscore between a lowercase letter/digit and an uppercase letter (e.g., "BusinessUnit" -> "Business_Unit")
+        string step2 = Regex.Replace(step1, @"([a-z\d])([A-Z])", "$1_$2");
+
+        return step2.ToLowerInvariant();
+    }
+
     private static List<TableMapping> OrderMappingsByDestinationDependencies(List<TableMapping> mappings)
     {
         var orderedMappings = new List<TableMapping>(mappings.Count);
@@ -292,9 +307,7 @@ class BaseVersion
         return dependencies;
     }
 
-    private static List<TableMapping> TopologicallySortMappings(
-        List<TableMapping> mappings,
-        List<ForeignKeyDependency> dependencies)
+    private static List<TableMapping> TopologicallySortMappings(List<TableMapping> mappings,List<ForeignKeyDependency> dependencies)
     {
         var mappingByTable = new Dictionary<string, TableMapping>(StringComparer.OrdinalIgnoreCase);
         foreach (TableMapping mapping in mappings)

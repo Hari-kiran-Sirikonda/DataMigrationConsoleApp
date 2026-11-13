@@ -1,2 +1,2 @@
 SourceTables,DestinationTables,WhereConditionString
-dbo.demo1,dest_scema.demo2,signup_date >= '2026-10-17' and signup_date <= '2026-11-10'
+adm.BusinessUnit,adm.business_unit,1=1
