@@ -90,7 +90,7 @@ class BaseVersion
     private static List<TableMapping> LoadTableMappings()
     {
         //Connection strings file
-        string mappingsPath = Path.Combine(AppContext.BaseDirectory, "TableMappings.csv");
+        string mappingsPath = Path.Combine(AppContext.BaseDirectory, "Servers.csv");
 
         if (!File.Exists(mappingsPath))
         {
@@ -152,15 +152,12 @@ class BaseVersion
 
         var mappings = new List<TableMapping>();
 
-        //Read the the source Password from the console.
         Console.Write($"Enter the Password for {connections[1]} : ");
         String sourceServerPassword = Console.ReadLine();
 
-        //Read the the destination Password from the console.
         Console.Write($"Enter the Password for {connections[6]} : ");
         String destinationServerPassword = Console.ReadLine();
 
-        //Read wether the source and destination table names are same
         Console.Write($"Are the source and destination table names are same (y/n) : ");
         String inputSameTableNames = Console.ReadLine();
         String sameTableNames = inputSameTableNames.ToLower();
@@ -567,8 +564,26 @@ class BaseVersion
     {
         HashSet<string> sourceColumns = GetTableColumnNames(sourceConnection, mapping.SourceTable, mapping.SourceServerType);
         HashSet<string> destinationColumns = GetTableColumnNames(destinationConnection, mapping.DestinationTable, mapping.DestinationServerType);
-        ValidateColumns(sourceColumns, destinationColumns, mapping);
+        
+        int isvalidated = ValidateColumns(sourceColumns, destinationColumns, mapping);
+        bool isCountMismatched = validateColumnsCount(sourceColumns, destinationColumns);
         LogColumnComparison(sourceColumns, destinationColumns, mapping);
+
+        if(isvalidated == 1)
+        {
+            Console.Write($"{mapping.SourceTable} --> {mapping.DestinationTable} : [Operation Skipped] Due to no columns found in {mapping.SourceTable}.");
+            return;
+        }
+        if(isvalidated == 2)
+        {
+            Console.Write($"{mapping.SourceTable} --> {mapping.DestinationTable} : [Operation Skipped] Due to no columns found in {mapping.DestinationTable}.");
+            return;
+        }
+        if (isCountMismatched)
+        {
+            Console.Write($"{mapping.SourceTable}:{mapping.DestinationTable} : [Operation Skipped] Column Count Mismatched ..!");
+            return;
+        }
 
         TableReference sourceTable = ParseTableName(mapping.SourceTable, mapping.SourceServerType);
         TableReference destinationTable = ParseTableName(mapping.DestinationTable, mapping.DestinationServerType);
@@ -686,8 +701,26 @@ class BaseVersion
     {
         HashSet<string> sourceColumns = GetTableColumnNames(sourceConnection, mapping.SourceTable, ServerType.SqlServer);
         HashSet<string> destinationColumns = GetTableColumnNames(destinationConnection, mapping.DestinationTable, ServerType.SqlServer);
-        ValidateColumns(sourceColumns, destinationColumns, mapping);
+
+        int isvalidated = ValidateColumns(sourceColumns, destinationColumns, mapping);
+        bool isCountMismatched = validateColumnsCount(sourceColumns, destinationColumns);
         LogColumnComparison(sourceColumns, destinationColumns, mapping);
+
+        if (isvalidated == 1)
+        {
+            Console.Write($"{mapping.SourceTable} --> {mapping.DestinationTable} : [Operation Skipped] Due to no columns found in {mapping.SourceTable}.");
+            return;
+        }
+        if (isvalidated == 2)
+        {
+            Console.Write($"{mapping.SourceTable} --> {mapping.DestinationTable} : [Operation Skipped] Due to no columns found in {mapping.DestinationTable}.");
+            return;
+        }
+        if (isCountMismatched)
+        {
+            Console.Write($"{mapping.SourceTable}:{mapping.DestinationTable} : [Operation Skipped] Column Count Mismatched ..!");
+            return;
+        }
 
         TableReference sourceTable = ParseTableName(mapping.SourceTable, ServerType.SqlServer);
         using SqlCommand command = new($"SELECT * FROM {QuoteTable(sourceTable, ServerType.SqlServer)} where {mapping.WhereConditionString}", sourceConnection);
@@ -696,7 +729,7 @@ class BaseVersion
         {
             DestinationTableName = QuoteTable(ParseTableName(mapping.DestinationTable, ServerType.SqlServer), ServerType.SqlServer),
             BatchSize = 5000,
-            BulkCopyTimeout = 600
+            BulkCopyTimeout = 600,
         };
 
         for (int i = 0; i < reader.FieldCount; i++)
@@ -728,8 +761,26 @@ class BaseVersion
     {
         HashSet<string> sourceColumns = GetTableColumnNames(sourceConnection, mapping.SourceTable, ServerType.PostgreSql);
         HashSet<string> destinationColumns = GetTableColumnNames(destinationConnection, mapping.DestinationTable, ServerType.PostgreSql);
-        ValidateColumns(sourceColumns, destinationColumns, mapping);
+
+        int isvalidated = ValidateColumns(sourceColumns, destinationColumns, mapping);
+        bool isCountMismatched = validateColumnsCount(sourceColumns, destinationColumns);
         LogColumnComparison(sourceColumns, destinationColumns, mapping);
+
+        if (isvalidated == 1)
+        {
+            Console.Write($"{mapping.SourceTable} --> {mapping.DestinationTable} : [Operation Skipped] Due to no columns found in {mapping.SourceTable}.");
+            return;
+        }
+        if (isvalidated == 2)
+        {
+            Console.Write($"{mapping.SourceTable} --> {mapping.DestinationTable} : [Operation Skipped] Due to no columns found in {mapping.DestinationTable}.");
+            return;
+        }
+        if (isCountMismatched)
+        {
+            Console.Write($"{mapping.SourceTable}:{mapping.DestinationTable} : [Operation Skipped] Column Count Mismatched ..!");
+            return;
+        }
 
         TableReference sourceTable = ParseTableName(mapping.SourceTable, ServerType.PostgreSql);
         TableReference destinationTable = ParseTableName(mapping.DestinationTable, ServerType.PostgreSql);
@@ -857,16 +908,19 @@ class BaseVersion
             : $"[{identifier.Replace("]", "]]" )}]";
     }
 
-    private static void ValidateColumns(HashSet<string> sourceColumns, HashSet<string> destinationColumns, TableMapping mapping)
+    private static int ValidateColumns(HashSet<string> sourceColumns, HashSet<string> destinationColumns, TableMapping mapping)
     {
         if (sourceColumns.Count == 0)
         {
-            throw new InvalidOperationException($"Source table '{mapping.SourceTable}' was not found or contains no columns.");
+            return 1;
         }
-
         if (destinationColumns.Count == 0)
         {
-            throw new InvalidOperationException($"Destination table '{mapping.DestinationTable}' was not found or contains no columns in database '{mapping.DestinationDatabase}'.");
+            return 2;
+        }
+        else
+        {
+            return 3;
         }
     }
 
@@ -944,5 +998,19 @@ class BaseVersion
         }
 
         return missingColumns;
+    }
+
+    public static bool validateColumnsCount(HashSet<string> sourceColumns, HashSet<string> destinationColumns)
+    {
+        int sourceCount = sourceColumns.Count;
+        int destinationCount = destinationColumns.Count;
+        if(sourceCount == destinationCount)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
     }
 }

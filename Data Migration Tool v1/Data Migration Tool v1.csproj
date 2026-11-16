@@ -16,7 +16,7 @@
     <None Update="Tables.csv">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Update="TableMappings.csv" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Servers.csv" CopyToOutputDirectory="PreserveNewest" />
     <PackageReference Include="log4net" Version="3.2.0" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.14" />
