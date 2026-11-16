@@ -1,0 +1,243 @@
+====================================================================================================
+                         PROGRAM EXECUTION FLOW: BaseVersion (C# .NET)
+====================================================================================================
+
+                                        ( START: Main() )
+                                                |
+                                                v
+                       +-------------------------------------------------+
+                       |  1. INITIALIZE LOGGING                          |
+                       |     - Locate "log4net.config" in BaseDirectory  |
+                       |     - XmlConfigurator.Configure()               |
+                       +------------------------+------------------------+
+                                                |
+                                                v
+                       +-------------------------------------------------+
+                       |  2. ENTER GLOBAL TRY / CATCH BLOCK              |
+                       |     Catches:                                    |
+                       |     - FileNotFoundException                     |
+                       |     - InvalidDataException                      |
+                       |     - InvalidOperationException                 |
+                       |     - Exception (General fallback)              |
+                       +------------------------+------------------------+
+                                                |
+                                                v
+====================================================================================================
+                               PHASE 1: LoadTableMappings()
+====================================================================================================
+                                                |
+                                                v
+                       +-------------------------------------------------+
+                       |  Check if "Servers.csv" exists                  |
+                       +------------------------+------------------------+
+                                                |
+                          +---[ No ]------------+------------[ Yes ]---+
+                          |                                            |
+                          v                                            v
+        +-----------------------------------+     +--------------------------------------------+
+        |  Throw FileNotFoundException      |     |  Read Servers.csv                          |
+        |  --> Caught in Main() & Logged    |     |  - Parse row 1 (connection details)        |
+        +-----------------------------------+     |  - Validate 10 headers via validateHeaders |
+                                                  +--------------------+-----------------------+
+                                                                       |
+                                                                       v
+                                                  +--------------------------------------------+
+                                                  |  Read Tables.csv                           |
+                                                  |  - Parse row 0 (headers)                   |
+                                                  |  - Validate 3 headers:                     |
+                                                  |    SourceTables, DestinationTables,        |
+                                                  |    WhereConditionString                    |
+                                                  +--------------------+-----------------------+
+                                                                       |
+                                                                       v
+                                                  +--------------------------------------------+
+                                                  |  Console Prompts (Interactive Input)       |
+                                                  |  1. Source Server Password                 |
+                                                  |  2. Destination Server Password            |
+                                                  |  3. Are source & dest table names same?    |
+                                                  |     (y / n)                                |
+                                                  +--------------------+-----------------------+
+                                                                       |
+                                                                       v
+                                                  +--------------------------------------------+
+                                                  |  Establishes the connection for            |
+                                                  |  - source database                         |
+                                                  |  - destination database                    |
+                                                  +--------------------+-----------------------+
+                                                                       |
+                                                                       v
+                                                  +--------------------+-----------------------+
+                                                  |  Loop Through Tables.csv (lineNumber = 1+) |
+                                                  |  - Skip blank/whitespace-only lines        |
+                                                  |  - ParseCsvLine() (handles quotes/commas)  |
+                                                  +--------------------+-----------------------+
+                                                                       |
+                                                                       v
+                                                  <  pair.Length == 3 AND no empty fields?     >
+                                                                       |
+                                   +---[ No ]--------------------------+---[ Yes ]---+
+                                   |                                                 |
+                                   v                                                 v
+                 +-----------------------------------+     +-----------------------------------+
+                 |  Throw InvalidDataException       |     |  Check sameTableNames ('y' / 'n') |
+                 |  (Note: Currently rejects empty   |     |  - 'y': DestTable = pair[0]       |
+                 |   WhereConditionString here!)     |     |  - 'n': DestTable = pair[1]       |
+                 +-----------------------------------+     |  - Other: Throw InvalidDataEx     |
+                                                           |  - ParseServerType() & ParsePort()|
+                                                           |  - Add TableMapping to list       |
+                                                           +-----------------+-----------------+
+                                                                             |
+                                                                             v
+                                                           <  mappings.Count == 0?             >
+                                                                             |
+                                             +---[ Yes ]---------------------+---[ No ]----+
+                                             |                                             |
+                                             v                                             v
+                           +-----------------------------------+            ( Return mappings )
+                           |  Throw InvalidDataException       |                           |
+                           |  ("No table mappings found")      |                           |
+                           +-----------------------------------+                           |
+                                                                                           |
+===========================================================================================+========
+                       PHASE 2: OrderMappingsByDestinationDependencies()
+====================================================================================================
+                                                |
+                                                v
+                       +-------------------------------------------------+
+                       |  Group mappings by DestinationConnectionKey     |
+                       |  (ServerType, Host, Port, DB, User, Password)   |
+                       +------------------------+------------------------+
+                                                |
+                                                v
+                       +-------------------------------------------------+
+                       |  For Each Destination Group:                    |
+                       |  1. CreateConnection() & Open()                 |
+                       |  2. GetForeignKeyDependencies()                 |
+                       |     - SqlServer: query sys.foreign_keys         |
+                       |     - PostgreSql: query pg_constraint ('f')     |
+                       +------------------------+------------------------+
+                                                |
+                                                v
+                       +-------------------------------------------------+
+                       |  TopologicallySortMappings()                    |
+                       |  - Detect duplicate destination table mappings  |
+                       |  - Build Parent -> Child dependency graph       |
+                       |  - Check for Self-Referencing FKs               |
+                       |  - Kahn's Algorithm: Order Parent BEFORE Child  |
+                       +------------------------+------------------------+
+                                                |
+                          +---[ Cycle / Self-FK / Duplicate ]----------+---[ Valid DAG ]---+
+                          |                                                                |
+                          v                                                                v
+        +-----------------------------------+                       +-----------------------------------+
+        |  Throw InvalidOperationException  |                       |  Append sorted group to           |
+        |  --> Caught in Main() & Logged    |                       |  orderedMappings list             |
+        +-----------------------------------+                       +-----------------+-----------------+
+                                                                                      |
+======================================================================================+=============
+                       PHASE 3: Migration Loop -> MigrateTablePair(mapping)
+====================================================================================================
+                                                |
+                                                v
+                       <  More TableMappings in orderedMappings?         >
+                                                |
+                          +---[ No ]------------+------------[ Yes ]---+
+                          |                                            |
+                          v                                            v
+             ( END: Program Complete )            +--------------------------------------------+
+                                                  |  Check string.IsNullOrWhiteSpace(where)    |
+                                                  |  - If true: Console.Write("[SKIPPED]...")  |
+                                                  |    (Note: No early 'return' in code yet)   |
+                                                  +--------------------+-----------------------+
+                                                                       |
+                                                                       v
+                                                  +--------------------------------------------+
+                                                  |  Open DB Connections (in try/catch)        |
+                                                  |  - sourceConnection.Open()                 |
+                                                  |  - destinationConnection.Open()            |
+                                                  +--------------------+-----------------------+
+                                                                       |
+                                                                       v
+                       <  Provider Routing & !IsNullOrWhiteSpace(WhereConditionString)  >
+                                                |
+          +-------------------------------------+-------------------------------------+
+          |                                     |                                     |
+          v                                     v                                     v
+[ SqlServer -> SqlServer ]           [ PostgreSql -> PostgreSql ]          [ Cross-Provider / Else ]
+          |                                     |                                     |
+          v                                     v                                     v
++------------------------+           +------------------------+            < WhereCondition empty? >
+| MigrateSqlServerPair() |           | MigratePostgreSqlPair()|              /                 \
++-----------+------------+           +-----------+------------+         [ Yes ]               [ No ]
+            |                                    |                         |                    |
+            |                                    |                         v                    v
+            |                                    |               +-------------------+  +-----------------------------+
+            |                                    |               | Log.Warn(SKIPPED) |  | MigrateCrossProviderPair()  |
+            |                                    |               | --> Next Mapping  |  +--------------+--------------+
+            |                                    |               +-------------------+                 |
+            +------------------------------------+-----------------------------------------------------+
+                                                 |
+                                                 v
+====================================================================================================
+                       PHASE 4: Pre-Migration Schema Gate (Inside Each Pair Method)
+====================================================================================================
+                                                 |
+                                                 v
+                       +-------------------------------------------------+
+                       |  Fetch Column Names via INFORMATION_SCHEMA      |
+                       |  - sourceColumns = GetTableColumnNames(...)     |
+                       |  - destinationColumns = GetTableColumnNames(...) |
+                       +------------------------+------------------------+
+                                                |
+                                                v
+                       +-------------------------------------------------+
+                       |  ValidateColumns() & validateColumnsCount()     |
+                       |  LogColumnComparison()                          |
+                       |  - Same provider: FindMissingColumns() (Exact)  |
+                       |  - Cross provider: FindMissingColumnsByNorm()   |
+                       |    (uses ToSnakeCase() normalization)           |
+                       +------------------------+------------------------+
+                                                |
+                                                v
+                       <  Gate Check:                                    >
+                       <  1. sourceColumns.Count == 0? (isvalidated == 1)>
+                       <  2. destColumns.Count == 0?   (isvalidated == 2)>
+                       <  3. sourceCount != destCount? (isCountMismatched)>
+                                                |
+                          +---[ Any True ]------+------------[ All False ]---+
+                          |                                                  |
+                          v                                                  v
+        +-----------------------------------+     +--------------------------------------------+
+        |  Console.Write("[Operation        |     |  Proceed to Data Extraction & Load         |
+        |   Skipped]...") & return          |     +----------------------+---------------------+
+        +-----------------+-----------------+                            |
+                          |                                              v
+                          |         ================================================================
+                          |                   PHASE 5: Provider-Specific Data Transfer
+                          |         ================================================================
+                          |                                              |
+                          |            +---------------------------------+---------------------------------+
+                          |            |                                 |                                 |
+                          |            v                                 v                                 v
+                          |   [ SqlServer -> SqlServer ]      [ PostgreSql -> PostgreSql ]      [ Cross-Provider (SQL <-> PG) ]
+                          |   - SELECT * WHERE <cond>         - SELECT * WHERE <cond>           - SELECT * WHERE <cond>
+                          |   - Map matching exact cols       - Map matching exact cols         - Map via ToSnakeCase()
+                          |   - If 0 matches -> return        - If 0 matches -> return          - If 0 matches -> return
+                          |   - SqlBulkCopy                   - BeginBinaryImport()             - Build parameterized INSERT
+                          |     (KeepIdentity, Batch=5000)      (COPY ... FROM STDIN BINARY)    - If Dest=SqlServer & Identity:
+                          |   - WriteToServer(reader)         - Loop reader -> Write/WriteNull    SET IDENTITY_INSERT ON
+                          |                                   - importer.Complete()             - Loop reader -> ExecuteNonQuery()
+                          |                                                                     - Finally: IDENTITY_INSERT OFF
+                          |            |                                 |                                 |
+                          |            +---------------------------------+---------------------------------+
+                          |                                              |
+                          |                                              v
+                          |                       +--------------------------------------------+
+                          |                       |  Log.Info("Data Migrated successfully")    |
+                          |                       |  Dispose Connections & Readers ('using')   |
+                          |                       +----------------------+---------------------+
+                          |                                              |
+                          +----------------------------------------------+
+                                                 |
+                                                 v
+                                  ( Loop Back to Next Mapping )

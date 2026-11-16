@@ -1,2 +1,2 @@
 SourceTables,DestinationTables,WhereConditionString
-ia.CallVolume,ia.callvolume_test,1=1
+adm.Steps,adm.steps,1=1

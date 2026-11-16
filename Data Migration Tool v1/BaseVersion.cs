@@ -59,8 +59,8 @@ class BaseVersion
 
         try
         {
-                List<TableMapping> mappings = LoadTableMappings();
-                mappings = OrderMappingsByDestinationDependencies(mappings);
+            List<TableMapping> mappings = LoadTableMappings();
+            mappings = OrderMappingsByDestinationDependencies(mappings);
 
             Log.Info($"Found {mappings.Count} table mapping(s).");
 
@@ -497,6 +497,13 @@ class BaseVersion
     {
         string sourceLocation = $"{mapping.SourceServerType}:{mapping.SourceTable}";
         string destinationLocation = $"{mapping.DestinationServerType}:{mapping.DestinationTable}";
+        string whereCondition = $"{mapping.WhereConditionString}";
+
+        if (string.IsNullOrWhiteSpace(whereCondition))
+        {
+            Console.Write($"[SKIPPED] {mapping.SourceTable} --> {mapping.DestinationTable} No Where Condition..!");
+        }
+
         Log.Info($"Starting migration: {sourceLocation} -> {destinationLocation}");
 
         try
@@ -653,6 +660,7 @@ class BaseVersion
                 identityInsertEnabled = true;
             }
 
+            const int progressBatchSize = 1000;
             long rowsCopied = 0;
             while (reader.Read())
             {
@@ -664,9 +672,22 @@ class BaseVersion
 
                 insertCommand.ExecuteNonQuery();
                 rowsCopied++;
+
+                if (rowsCopied % progressBatchSize == 0)
+                {
+                    string progressMessage =
+                        $"[{mapping.SourceTable} -> {mapping.DestinationTable}] " +
+                        $"Migrated {rowsCopied:N0} rows so far...";
+                    Console.WriteLine(progressMessage);
+                    Log.Info(progressMessage);
+                }
             }
 
-            Log.Info($"Data Migrated successfully: {mapping.SourceTable} -> {mapping.DestinationTable}. Rows copied: {rowsCopied}");
+            string completionMessage =
+                $"Data Migrated successfully: {mapping.SourceTable} -> {mapping.DestinationTable}. " +
+                $"Rows copied: {rowsCopied:N0}";
+            Console.WriteLine(completionMessage);
+            Log.Info(completionMessage);
         }
         finally
         {
@@ -723,13 +744,22 @@ class BaseVersion
         }
 
         TableReference sourceTable = ParseTableName(mapping.SourceTable, ServerType.SqlServer);
+        const int batchSize = 5000;
         using SqlCommand command = new($"SELECT * FROM {QuoteTable(sourceTable, ServerType.SqlServer)} where {mapping.WhereConditionString}", sourceConnection);
         using SqlDataReader reader = command.ExecuteReader();
         using SqlBulkCopy bulkCopy = new(destinationConnection, SqlBulkCopyOptions.KeepIdentity, null)
         {
             DestinationTableName = QuoteTable(ParseTableName(mapping.DestinationTable, ServerType.SqlServer), ServerType.SqlServer),
-            BatchSize = 5000,
+            BatchSize = batchSize,
+            NotifyAfter = batchSize,
             BulkCopyTimeout = 600,
+        };
+
+        bulkCopy.SqlRowsCopied += (sender, e) =>
+        {
+            string message = $"[{mapping.SourceTable} -> {mapping.DestinationTable}] " + $"Migrated {e.RowsCopied:N0} rows so far...";
+            Console.WriteLine(message);
+            Log.Info(message);
         };
 
         for (int i = 0; i < reader.FieldCount; i++)
