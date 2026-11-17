@@ -629,20 +629,6 @@ class BaseVersion
             return;
         }
 
-        string columnList = string.Join(", ", matchingColumns.Select(column => QuoteIdentifier(column.DestinationName, mapping.DestinationServerType)));
-        string parameterList = string.Join(", ", matchingColumns.Select((_, index) => $"@p{index}"));
-
-        //This is the command used to insert the rows from source to destination.
-        using DbCommand insertCommand = destinationConnection.CreateCommand();
-        insertCommand.CommandText = $"INSERT INTO {QuoteTable(destinationTable, mapping.DestinationServerType)} ({columnList}) VALUES ({parameterList})";
-
-        for (int i = 0; i < matchingColumns.Count; i++)
-        {
-            DbParameter parameter = insertCommand.CreateParameter();
-            parameter.ParameterName = $"@p{i}";
-            insertCommand.Parameters.Add(parameter);
-        }
-
         bool identityInsertEnabled = false;
 
         try
@@ -660,27 +646,33 @@ class BaseVersion
                 identityInsertEnabled = true;
             }
 
-            const int progressBatchSize = 1000;
+            int batchSize = Math.Min(500, Math.Max(1, 2000 / matchingColumns.Count));
+            var batch = new List<object[]>(batchSize);
             long rowsCopied = 0;
             while (reader.Read())
             {
+                var values = new object[matchingColumns.Count];
                 for (int i = 0; i < matchingColumns.Count; i++)
                 {
-                    object value = reader.GetValue(matchingColumns[i].SourceOrdinal);
-                    insertCommand.Parameters[i].Value = value is DBNull ? DBNull.Value : value;
+                    values[i] = reader.GetValue(matchingColumns[i].SourceOrdinal);
                 }
 
-                insertCommand.ExecuteNonQuery();
-                rowsCopied++;
+                batch.Add(values);
 
-                if (rowsCopied % progressBatchSize == 0)
+                if (batch.Count == batchSize)
                 {
-                    string progressMessage =
-                        $"[{mapping.SourceTable} -> {mapping.DestinationTable}] " +
-                        $"Migrated {rowsCopied:N0} rows so far...";
-                    Console.WriteLine(progressMessage);
-                    Log.Info(progressMessage);
+                    InsertCrossProviderBatch(destinationConnection, destinationTable, matchingColumns, batch, mapping.DestinationServerType);
+                    rowsCopied += batch.Count;
+                    ReportBatchProgress(mapping, rowsCopied);
+                    batch.Clear();
                 }
+            }
+
+            if (batch.Count > 0)
+            {
+                InsertCrossProviderBatch(destinationConnection, destinationTable, matchingColumns, batch, mapping.DestinationServerType);
+                rowsCopied += batch.Count;
+                ReportBatchProgress(mapping, rowsCopied);
             }
 
             string completionMessage =
@@ -700,6 +692,50 @@ class BaseVersion
             }
 
         }
+    }
+
+    private static void InsertCrossProviderBatch(
+        DbConnection destinationConnection,
+        TableReference destinationTable,
+        List<ColumnMapping> matchingColumns,
+        List<object[]> rows,
+        ServerType destinationServerType)
+    {
+        string columnList = string.Join(", ", matchingColumns.Select(column => QuoteIdentifier(column.DestinationName, destinationServerType)));
+        var valueRows = new List<string>(rows.Count);
+
+        using DbCommand insertCommand = destinationConnection.CreateCommand();
+        for (int rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+        {
+            var parameterNames = new string[matchingColumns.Count];
+            for (int columnIndex = 0; columnIndex < matchingColumns.Count; columnIndex++)
+            {
+                string parameterName = $"@p{rowIndex}_{columnIndex}";
+                parameterNames[columnIndex] = parameterName;
+
+                DbParameter parameter = insertCommand.CreateParameter();
+                parameter.ParameterName = parameterName;
+                parameter.Value = rows[rowIndex][columnIndex] is DBNull
+                    ? DBNull.Value
+                    : rows[rowIndex][columnIndex];
+                insertCommand.Parameters.Add(parameter);
+            }
+
+            valueRows.Add($"({string.Join(", ", parameterNames)})");
+        }
+
+        insertCommand.CommandText =
+            $"INSERT INTO {QuoteTable(destinationTable, destinationServerType)} ({columnList}) VALUES {string.Join(", ", valueRows)}";
+        using DbTransaction transaction = destinationConnection.BeginTransaction();
+        insertCommand.Transaction = transaction;
+        insertCommand.ExecuteNonQuery();
+        transaction.Commit();
+    }
+
+    private static void ReportBatchProgress(TableMapping mapping, long rowsCopied)
+    {
+        string progressMessage = $"[{mapping.SourceTable} -> {mapping.DestinationTable}] " + $"Migrated {rowsCopied:N0} rows.";
+        Log.Info(progressMessage);
     }
 
     private static bool IsSqlServerIdentityColumn(SqlConnection connection, TableReference table, string columnName)

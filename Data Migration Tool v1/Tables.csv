@@ -1,2 +1,2 @@
 SourceTables,DestinationTables,WhereConditionString
-adm.Steps,adm.steps,1=1
+ia.AgentSteps,ia.agent_steps,StartTime >= '2026-10-01' AND EndTime <= '2026-11-11'
