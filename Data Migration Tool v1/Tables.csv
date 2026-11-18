@@ -1,2 +1,2 @@
 SourceTables,DestinationTables,WhereConditionString
-ia.AgentSteps,ia.agent_steps,StartTime >= '2026-10-01' AND EndTime <= '2026-11-11'
+ia.KVP,ia.kvp,"StartTime >= CAST('2026-11-01' AS date) AND StartTime < DATEADD(DAY, 1, CAST('2026-11-08' AS date))"

@@ -38,7 +38,11 @@ class BaseVersion
 
     private sealed record TableReference(string Schema, string Table);
 
-    private sealed record ColumnMapping(int SourceOrdinal, string SourceName, string DestinationName);
+    private sealed record ColumnMapping(
+        int SourceOrdinal,
+        string SourceName,
+        string DestinationName,
+        bool UseSequence = false);
 
     private sealed record DestinationConnectionKey(
         ServerType ServerType,
@@ -573,7 +577,6 @@ class BaseVersion
         HashSet<string> destinationColumns = GetTableColumnNames(destinationConnection, mapping.DestinationTable, mapping.DestinationServerType);
         
         int isvalidated = ValidateColumns(sourceColumns, destinationColumns, mapping);
-        bool isCountMismatched = validateColumnsCount(sourceColumns, destinationColumns);
         LogColumnComparison(sourceColumns, destinationColumns, mapping);
 
         if(isvalidated == 1)
@@ -586,7 +589,7 @@ class BaseVersion
             Console.Write($"{mapping.SourceTable} --> {mapping.DestinationTable} : [Operation Skipped] Due to no columns found in {mapping.DestinationTable}.");
             return;
         }
-        if (isCountMismatched)
+        if (sourceColumns.Count > destinationColumns.Count)
         {
             Console.Write($"{mapping.SourceTable}:{mapping.DestinationTable} : [Operation Skipped] Column Count Mismatched ..!");
             return;
@@ -623,9 +626,46 @@ class BaseVersion
             }
         }
 
+        List<string> extraDestinationColumns = destinationColumnsByNormalizedName
+            .Where(column => !sourceColumnsByNormalizedName.Contains(column.Key))
+            .Select(column => column.Value)
+            .ToList();
+
+        if (extraDestinationColumns.Count > 0)
+        {
+            bool generateSequence = PromptForExtraDestinationColumns(mapping, extraDestinationColumns);
+
+            foreach (string destinationColumn in extraDestinationColumns)
+            {
+                bool useSequence = generateSequence && IsNumericDestinationColumn(
+                    destinationConnection,
+                    destinationTable,
+                    destinationColumn,
+                    mapping.DestinationServerType);
+
+                if (generateSequence && !useSequence)
+                {
+                    Log.Warn($"Destination-only column '{destinationColumn}' is not numeric. NULL will be used.");
+                }
+
+                matchingColumns.Add(new ColumnMapping(-1, string.Empty, destinationColumn, useSequence));
+            }
+        }
+
         if (matchingColumns.Count == 0)
         {
             Log.Warn("No matching columns found. Operation skipped for this pair.");
+            return;
+        }
+
+        if (mapping.DestinationServerType == ServerType.PostgreSql)
+        {
+            CopyCrossProviderToPostgreSql(
+                (NpgsqlConnection)destinationConnection,
+                destinationTable,
+                matchingColumns,
+                reader,
+                mapping);
             return;
         }
 
@@ -648,16 +688,23 @@ class BaseVersion
 
             int batchSize = Math.Min(500, Math.Max(1, 2000 / matchingColumns.Count));
             var batch = new List<object[]>(batchSize);
+            long sequenceValue = 1;
             long rowsCopied = 0;
             while (reader.Read())
             {
                 var values = new object[matchingColumns.Count];
                 for (int i = 0; i < matchingColumns.Count; i++)
                 {
-                    values[i] = reader.GetValue(matchingColumns[i].SourceOrdinal);
+                    ColumnMapping column = matchingColumns[i];
+                    values[i] = column.SourceOrdinal >= 0
+                        ? reader.GetValue(column.SourceOrdinal)
+                        : column.UseSequence
+                            ? sequenceValue
+                            : DBNull.Value;
                 }
 
                 batch.Add(values);
+                sequenceValue++;
 
                 if (batch.Count == batchSize)
                 {
@@ -692,6 +739,81 @@ class BaseVersion
             }
 
         }
+    }
+
+    private static void CopyCrossProviderToPostgreSql(
+        NpgsqlConnection destinationConnection,
+        TableReference destinationTable,
+        List<ColumnMapping> matchingColumns,
+        DbDataReader reader,
+        TableMapping mapping)
+    {
+        const int transactionBatchSize = 10000;
+        string columnList = string.Join(", ", matchingColumns.Select(column => QuoteIdentifier(column.DestinationName, ServerType.PostgreSql)));
+        string copyCommand =
+            $"COPY {QuoteTable(destinationTable, ServerType.PostgreSql)} ({columnList}) FROM STDIN (FORMAT BINARY)";
+
+        long sequenceValue = 1;
+        long rowsCopied = 0;
+
+        Log.Info("Reading source rows for PostgreSQL COPY.");
+        bool hasRow = reader.Read();
+        while (hasRow)
+        {
+            int rowsInTransaction = 0;
+            using (NpgsqlTransaction transaction = destinationConnection.BeginTransaction())
+            {
+                using (NpgsqlBinaryImporter importer = destinationConnection.BeginBinaryImport(copyCommand))
+                {
+                    do
+                    {
+                        importer.StartRow();
+
+                        foreach (ColumnMapping column in matchingColumns)
+                        {
+                            if (column.SourceOrdinal >= 0)
+                            {
+                                object value = reader.GetValue(column.SourceOrdinal);
+                                if (value is DBNull)
+                                {
+                                    importer.WriteNull();
+                                }
+                                else
+                                {
+                                    importer.Write(value);
+                                }
+                            }
+                            else if (column.UseSequence)
+                            {
+                                importer.Write(sequenceValue);
+                            }
+                            else
+                            {
+                                importer.WriteNull();
+                            }
+                        }
+
+                        sequenceValue++;
+                        rowsCopied++;
+                        rowsInTransaction++;
+                        hasRow = reader.Read();
+                    }
+                    while (hasRow && rowsInTransaction < transactionBatchSize);
+
+                    importer.Complete();
+                }
+
+                transaction.Commit();
+            }
+
+            ReportBatchProgress(mapping, rowsCopied);
+        }
+
+        string completionMessage =
+            $"Data Migrated successfully: {mapping.SourceTable} -> {mapping.DestinationTable}. " +
+            $"Rows copied: {rowsCopied:N0}";
+        Console.WriteLine(completionMessage);
+        Log.Info(completionMessage);
     }
 
     private static void InsertCrossProviderBatch(
@@ -730,6 +852,78 @@ class BaseVersion
         insertCommand.Transaction = transaction;
         insertCommand.ExecuteNonQuery();
         transaction.Commit();
+    }
+
+    private static bool PromptForExtraDestinationColumns(TableMapping mapping, List<string> extraDestinationColumns)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"Destination table '{mapping.DestinationTable}' has columns that do not exist in source table '{mapping.SourceTable}':");
+        foreach (string column in extraDestinationColumns)
+        {
+            Console.WriteLine($"  - {column}");
+        }
+
+        while (true)
+        {
+            Console.WriteLine("Choose how to populate these destination-only columns:");
+            Console.WriteLine("1. Insert NULL values");
+            Console.WriteLine("2. Generate sequential values for numeric columns and NULL for other columns");
+            Console.Write("Enter option (1 or 2): ");
+
+            string option = Console.ReadLine()?.Trim();
+            if (option == "1")
+            {
+                return false;
+            }
+
+            if (option == "2")
+            {
+                return true;
+            }
+
+            Console.WriteLine("Invalid option. Enter 1 or 2.");
+        }
+    }
+
+    private static bool IsNumericDestinationColumn(
+        DbConnection connection,
+        TableReference table,
+        string columnName,
+        ServerType serverType)
+    {
+        const string query =
+            "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS " +
+            "WHERE TABLE_SCHEMA = @Schema AND TABLE_NAME = @Table AND COLUMN_NAME = @Column";
+
+        using DbCommand command = connection.CreateCommand();
+        command.CommandText = query;
+
+        AddParameter(command, "@Schema", table.Schema);
+        AddParameter(command, "@Table", table.Table);
+        AddParameter(command, "@Column", columnName);
+
+        object value = command.ExecuteScalar();
+        if (value is null || value is DBNull)
+        {
+            return false;
+        }
+
+        return serverType switch
+        {
+            ServerType.SqlServer => value.ToString()!.ToLowerInvariant() is
+                "tinyint" or "smallint" or "int" or "bigint" or "decimal" or "numeric" or "float" or "real" or "money" or "smallmoney",
+            ServerType.PostgreSql => value.ToString()!.ToLowerInvariant() is
+                "smallint" or "integer" or "bigint" or "decimal" or "numeric" or "real" or "double precision" or "money",
+            _ => false
+        };
+    }
+
+    private static void AddParameter(DbCommand command, string name, object value)
+    {
+        DbParameter parameter = command.CreateParameter();
+        parameter.ParameterName = name;
+        parameter.Value = value;
+        command.Parameters.Add(parameter);
     }
 
     private static void ReportBatchProgress(TableMapping mapping, long rowsCopied)
@@ -989,7 +1183,7 @@ class BaseVersion
             return 3;
         }
     }
-
+    
     private static void LogColumnComparison(HashSet<string> sourceColumns, HashSet<string> destinationColumns, TableMapping mapping)
     {
         Log.Info($"Count of Source Columns: {sourceColumns.Count}");
