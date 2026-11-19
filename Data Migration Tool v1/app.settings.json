@@ -1,3 +1,4 @@
 {
-  "transferBatchSize": 10000
+  "transferBatchSize": 10000,
+  "testVariable": 20
 }

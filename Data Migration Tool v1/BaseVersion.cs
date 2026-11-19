@@ -58,7 +58,7 @@ class BaseVersion
 
     public record MissingColumnInfo(string MissingFrom, string ColumnName);
 
-    private sealed record ApplicationSettings(int TransferBatchSize);
+    private sealed record ApplicationSettings(int TransferBatchSize, int TestVariable);
 
     static void Main()
     {
@@ -637,7 +637,7 @@ class BaseVersion
         TableReference destinationTable = ParseTableName(mapping.DestinationTable, mapping.DestinationServerType);
 
         using DbCommand sourceCommand = sourceConnection.CreateCommand();
-        sourceCommand.CommandText = $"SELECT * FROM {QuoteTable(sourceTable, mapping.SourceServerType)} where {mapping.WhereConditionString}";
+        sourceCommand.CommandText = $"SELECT * FROM {QuoteTable(sourceTable, mapping.SourceServerType)} (nolock) where {mapping.WhereConditionString}";
         sourceCommand.CommandTimeout = 0;
         using DbDataReader reader = sourceCommand.ExecuteReader();
 
@@ -789,8 +789,7 @@ class BaseVersion
     {
         int transactionBatchSize = AppSettings.TransferBatchSize;
         string columnList = string.Join(", ", matchingColumns.Select(column => QuoteIdentifier(column.DestinationName, ServerType.PostgreSql)));
-        string copyCommand =
-            $"COPY {QuoteTable(destinationTable, ServerType.PostgreSql)} ({columnList}) FROM STDIN (FORMAT BINARY)";
+        string copyCommand = $"COPY {QuoteTable(destinationTable, ServerType.PostgreSql)} ({columnList}) FROM STDIN (FORMAT BINARY)";
 
         long sequenceValue = 1;
         long rowsCopied = 0;
@@ -891,8 +890,7 @@ class BaseVersion
             valueRows.Add($"({string.Join(", ", parameterNames)})");
         }
 
-        insertCommand.CommandText =
-            $"INSERT INTO {QuoteTable(destinationTable, destinationServerType)} ({columnList}) VALUES {string.Join(", ", valueRows)}";
+        insertCommand.CommandText = $"INSERT INTO {QuoteTable(destinationTable, destinationServerType)} ({columnList}) VALUES {string.Join(", ", valueRows)}";
         using DbTransaction transaction = destinationConnection.BeginTransaction();
         insertCommand.Transaction = transaction;
         insertCommand.ExecuteNonQuery();

@@ -1,2 +1,2 @@
 SourceTables,DestinationTables,WhereConditionString
-nltx.Transcription,nltx.transcription,"StartTime >= CAST('2026-10-01' AS date) AND StartTime < DATEADD(DAY, 1, CAST('2026-11-11' AS date))"
+pm.UserPresenceRoutingStatus,pm.user_presence_routing_status,"StartTime > DATEADD(DAY, 1, CAST('2026-10-01' AS date)) AND EndTime <= CAST('2026-11-11' AS date) AND StartTime < EndTime"
