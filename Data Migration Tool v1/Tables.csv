@@ -1,2 +1,2 @@
 SourceTables,DestinationTables,WhereConditionString
-ia.KVP,ia.kvp,"StartTime >= CAST('2026-11-01' AS date) AND StartTime < DATEADD(DAY, 1, CAST('2026-11-08' AS date))"
+nltx.Transcription,nltx.transcription,"StartTime >= CAST('2026-10-01' AS date) AND StartTime < DATEADD(DAY, 1, CAST('2026-11-11' AS date))"

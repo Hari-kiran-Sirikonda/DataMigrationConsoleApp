@@ -7,11 +7,13 @@ using System.Collections.Generic;
 using System.Data.Common;
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 class BaseVersion
 {
     private static readonly ILog Log = LogManager.GetLogger(typeof(BaseVersion));
+    private static ApplicationSettings AppSettings { get; set; } = null!;
 
     private enum ServerType
     {
@@ -56,6 +58,8 @@ class BaseVersion
 
     public record MissingColumnInfo(string MissingFrom, string ColumnName);
 
+    private sealed record ApplicationSettings(int TransferBatchSize);
+
     static void Main()
     {
         string logConfigPath = Path.Combine(AppContext.BaseDirectory, "log4net.config");
@@ -63,6 +67,7 @@ class BaseVersion
 
         try
         {
+            AppSettings = LoadApplicationSettings();
             List<TableMapping> mappings = LoadTableMappings();
             mappings = OrderMappingsByDestinationDependencies(mappings);
 
@@ -88,6 +93,35 @@ class BaseVersion
         catch (Exception ex)
         {
             Log.Error("An unexpected error occurred.", ex);
+        }
+    }
+
+    private static ApplicationSettings LoadApplicationSettings()
+    {
+        string settingsPath = Path.Combine(AppContext.BaseDirectory, "app.settings.json");
+
+        if (!File.Exists(settingsPath))
+        {
+            throw new FileNotFoundException("The application settings file was not found.", settingsPath);
+        }
+
+        try
+        {
+            string json = File.ReadAllText(settingsPath);
+            ApplicationSettings? settings = JsonSerializer.Deserialize<ApplicationSettings>(
+                json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+            if (settings is null || settings.TransferBatchSize <= 0)
+            {
+                throw new InvalidDataException("The transferBatchSize setting must be a positive integer.");
+            }
+
+            return settings;
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidDataException("The application settings file contains invalid JSON.", ex);
         }
     }
 
@@ -175,12 +209,15 @@ class BaseVersion
 
             string[] pair = ParseCsvLine(tablePairs[lineNumber]);
 
-            if (pair.Length != expectedTableHeaders.Length || Array.Exists(pair, string.IsNullOrWhiteSpace))
+            if (pair.Length != expectedTableHeaders.Length || string.IsNullOrWhiteSpace(pair[0]) || string.IsNullOrWhiteSpace(pair[1]))
             {
-                throw new InvalidDataException($"Line {lineNumber + 1} must contain fourteen values: SourceDatabase, SourceTables, DestinationDatabase, DestinationTables.");
+                throw new InvalidDataException(
+                    $"Line {lineNumber + 1} must contain source and destination table names.");
             }
 
-            if(sameTableNames == "y")
+            string whereCondition = string.IsNullOrWhiteSpace(pair[2]) ? "1=1" : pair[2].Trim();
+
+            if (sameTableNames == "y")
             {
                 mappings.Add(new TableMapping(
                 ParseServerType(connections[0], lineNumber + 1),
@@ -491,7 +528,8 @@ class BaseVersion
             Port = port,
             Database = database,
             Username = username,
-            Password = password
+            Password = password,
+            CommandTimeout = 0
         };
 
         return new NpgsqlConnection(postgresBuilder.ConnectionString);
@@ -600,6 +638,7 @@ class BaseVersion
 
         using DbCommand sourceCommand = sourceConnection.CreateCommand();
         sourceCommand.CommandText = $"SELECT * FROM {QuoteTable(sourceTable, mapping.SourceServerType)} where {mapping.WhereConditionString}";
+        sourceCommand.CommandTimeout = 0;
         using DbDataReader reader = sourceCommand.ExecuteReader();
 
         Dictionary<string, string> destinationColumnsByNormalizedName = BuildNormalizedColumnMap(destinationColumns, mapping.DestinationTable);
@@ -748,7 +787,7 @@ class BaseVersion
         DbDataReader reader,
         TableMapping mapping)
     {
-        const int transactionBatchSize = 10000;
+        int transactionBatchSize = AppSettings.TransferBatchSize;
         string columnList = string.Join(", ", matchingColumns.Select(column => QuoteIdentifier(column.DestinationName, ServerType.PostgreSql)));
         string copyCommand =
             $"COPY {QuoteTable(destinationTable, ServerType.PostgreSql)} ({columnList}) FROM STDIN (FORMAT BINARY)";
@@ -780,7 +819,15 @@ class BaseVersion
                                 }
                                 else
                                 {
-                                    importer.Write(value);
+                                    if (value is DateTime dateTime &&
+                                        column.DestinationName.Equals("date", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        importer.Write(DateOnly.FromDateTime(dateTime));
+                                    }
+                                    else
+                                    {
+                                        importer.Write(value);
+                                    }
                                 }
                             }
                             else if (column.UseSequence)
@@ -809,9 +856,7 @@ class BaseVersion
             ReportBatchProgress(mapping, rowsCopied);
         }
 
-        string completionMessage =
-            $"Data Migrated successfully: {mapping.SourceTable} -> {mapping.DestinationTable}. " +
-            $"Rows copied: {rowsCopied:N0}";
+        string completionMessage = $"Data Migrated successfully: {mapping.SourceTable} -> {mapping.DestinationTable}. " + $"Rows copied: {rowsCopied:N0}";
         Console.WriteLine(completionMessage);
         Log.Info(completionMessage);
     }
@@ -976,6 +1021,7 @@ class BaseVersion
         TableReference sourceTable = ParseTableName(mapping.SourceTable, ServerType.SqlServer);
         const int batchSize = 5000;
         using SqlCommand command = new($"SELECT * FROM {QuoteTable(sourceTable, ServerType.SqlServer)} where {mapping.WhereConditionString}", sourceConnection);
+        command.CommandTimeout = 0;
         using SqlDataReader reader = command.ExecuteReader();
         using SqlBulkCopy bulkCopy = new(destinationConnection, SqlBulkCopyOptions.KeepIdentity, null)
         {
@@ -1045,6 +1091,7 @@ class BaseVersion
         TableReference sourceTable = ParseTableName(mapping.SourceTable, ServerType.PostgreSql);
         TableReference destinationTable = ParseTableName(mapping.DestinationTable, ServerType.PostgreSql);
         using NpgsqlCommand command = new($"SELECT * FROM {QuoteTable(sourceTable, ServerType.PostgreSql)} where {mapping.WhereConditionString}", sourceConnection);
+        command.CommandTimeout = 0;
         using NpgsqlDataReader reader = command.ExecuteReader();
 
         var matchingColumns = new List<(int SourceOrdinal, string Name)>();
